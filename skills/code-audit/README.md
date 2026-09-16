@@ -22,4 +22,4 @@ Use when asked for a comprehensive audit or health review of the whole repo/code
 
 `skills/code-audit` in [quixtop/quix](https://github.com/quixtop/quix) · author: shrix
 
-<!-- written by worx publish — edit freely; remove this line to keep your edits -->
+<!-- written by apps publish — edit freely; remove this line to keep your edits -->

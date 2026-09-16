@@ -18,4 +18,4 @@ proj-env.sh - Common environment helper script used by a few skills
 
 `sh/proj-env.sh` in [quixtop/quix](https://github.com/quixtop/quix) · author: shrix
 
-<!-- written by worx publish — edit freely; remove this line to keep your edits -->
+<!-- written by apps publish — edit freely; remove this line to keep your edits -->

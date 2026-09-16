@@ -18,4 +18,4 @@ Quick one-line glance at the PROJECT task file (TODO.md / docs/tasks.md) with pr
 
 `skills/tasks` in [quixtop/quix](https://github.com/quixtop/quix) · author: shrix
 
-<!-- written by worx publish — edit freely; remove this line to keep your edits -->
+<!-- written by apps publish — edit freely; remove this line to keep your edits -->

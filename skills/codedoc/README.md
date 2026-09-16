@@ -18,4 +18,4 @@ Generate, verify, update, explain, and changelog code documentation — READMEs,
 
 `skills/codedoc` in [quixtop/quix](https://github.com/quixtop/quix) · author: shrix
 
-<!-- written by worx publish — edit freely; remove this line to keep your edits -->
+<!-- written by apps publish — edit freely; remove this line to keep your edits -->
