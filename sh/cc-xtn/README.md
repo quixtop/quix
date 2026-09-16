@@ -1,12 +1,17 @@
 # cc-xtn
 
-Enable and disable Claude Code plugins, skills and MCP servers; see their token weight.
+Enable and disable Claude Code plugins, skills and MCP servers; see their token weight. Needs: jq, Claude Code.
 
 ## Install
 
 ```bash
 mkdir -p ~/.local/bin && curl -fsSL https://raw.githubusercontent.com/quixtop/quix/main/sh/cc-xtn/cc-xtn -o ~/.local/bin/cc-xtn && chmod +x ~/.local/bin/cc-xtn
 ```
+
+## Requires
+
+- [jq](https://github.com/jqlang/jq)
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) — it configures it
 
 ## Usage
 
@@ -36,3 +41,5 @@ Categories (each has its own toggle mechanism):
 ## Source
 
 `sh/cc-xtn` in [quixtop/quix](https://github.com/quixtop/quix) · author: shrix
+
+<!-- written by worx publish — edit freely; remove this line to keep your edits -->

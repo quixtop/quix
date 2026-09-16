@@ -1,0 +1,22 @@
+[
+  {"query": "which model should I use for refactoring our billing service? it spans like 30 files across api/ and workers/", "should_trigger": true},
+  {"query": "I'm on Max and keep hitting the weekly cap by wednesday lol ... how do I get the most out of my plan when grinding on this monorepo all day", "should_trigger": true},
+  {"query": "ok next up: implement the invite-flow feature in apps/web — needs the endpoint, the UI wiring, tests, and a changelog note", "should_trigger": true},
+  {"query": "can u fan out a few subagents to clean up the TODOs and dead imports in src/ while we keep working on the parser here?", "should_trigger": true},
+  {"query": "there's an intermittent deadlock in worker.py under load, logs are in ~/logs/worker-0703.log — go deep on this one, take your time", "should_trigger": true},
+  {"query": "mouter status", "should_trigger": true},
+  {"query": "feels like we're burning opus-level effort on commit messages... can we set the effort levels sensibly for the boring stuff", "should_trigger": true},
+  {"query": "delegate the README + API docs update to something cheap in the background and keep this chat free for the schema work", "should_trigger": true},
+  {"query": "starting the multi-tenant migration epic today — break the PRD in docs/prd-tenants.md into tickets and then let's start building", "should_trigger": true},
+  {"query": "run a security review of the auth middleware before we ship v2.3 — and I want a second opinion on the session-token design too", "should_trigger": true},
+  {"query": "what's the pricing difference between opus 4.8 and sonnet 5 on the anthropic API? building a customer-facing support bot and need to pick a default", "should_trigger": false},
+  {"query": "add a model router to our inference gateway in go — round-robin across the three vllm replicas with health checks", "should_trigger": false},
+  {"query": "write a k8s manifest that canary-routes 10% of traffic to the new model deployment", "should_trigger": false},
+  {"query": "what does the walrus operator actually do in python? saw it in a PR and I'm confused", "should_trigger": false},
+  {"query": "explain the common effort-estimation techniques in scrum — planning poker vs t-shirt sizing, when to use which", "should_trigger": false},
+  {"query": "parallelize this numpy loop with multiprocessing, it's the bottleneck in etl.py", "should_trigger": false},
+  {"query": "which gpu should I rent for fine-tuning a 7B llama — 4090, a6000, or a100? budget is ~$2/hr", "should_trigger": false},
+  {"query": "summarize this blog post comparing gpt-5.5 and opus 4.8 benchmarks, I need talking points for standup", "should_trigger": false},
+  {"query": "route53 keeps serving stale records for staging.acme.dev — what TTL settings should I check?", "should_trigger": false},
+  {"query": "did anthropic ship a fable 5.1 yet? what changed vs fable 5?", "should_trigger": false}
+]

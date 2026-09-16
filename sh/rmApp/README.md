@@ -1,12 +1,16 @@
 # rmApp
 
-Remove a Mac app and every on-disk trace it left behind.
+Remove a Mac app and every on-disk trace it left behind. Needs: Homebrew.
 
 ## Install
 
 ```bash
 mkdir -p ~/.local/bin && curl -fsSL https://raw.githubusercontent.com/quixtop/quix/main/sh/rmApp/rmApp -o ~/.local/bin/rmApp && chmod +x ~/.local/bin/rmApp
 ```
+
+## Requires
+
+- [Homebrew](https://brew.sh) — optional — to find brew-installed shims
 
 ## Usage
 
@@ -53,3 +57,5 @@ Safety:
 ## Source
 
 `sh/rmApp` in [quixtop/quix](https://github.com/quixtop/quix) · author: shrix
+
+<!-- written by worx publish — edit freely; remove this line to keep your edits -->

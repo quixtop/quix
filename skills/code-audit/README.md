@@ -1,12 +1,16 @@
 # code-audit
 
-A read-only health audit of the whole repository, reported in one place.
+A read-only health audit of the whole repository, reported in one place. Needs: Codex CLI.
 
 ## Install
 
 ```bash
 d=~/.agents/skills; [ -d "$d" ]||d=~/.claude/skills; mkdir -p "$d" && curl -fsSL https://github.com/quixtop/quix/archive/main.tar.gz | tar -xz -C "$d" --strip-components=2 quix-main/skills/code-audit
 ```
+
+## Requires
+
+- [Codex CLI](https://github.com/openai/codex) — through its clodex pass
 
 ## Usage
 
@@ -17,3 +21,5 @@ Use when asked for a comprehensive audit or health review of the whole repo/code
 ## Source
 
 `skills/code-audit` in [quixtop/quix](https://github.com/quixtop/quix) · author: shrix
+
+<!-- written by worx publish — edit freely; remove this line to keep your edits -->

@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+# (c) Shrix
+# author: shrix
+# clido — minimal interactive Claude REPL on top of `claude -p`
+#
+# Usage:
+#   clido                    Start a new session in the current directory
+#
+# Input:
+#   Type your query at the `> ` prompt, press Enter.
+#   End a line with `\` to continue on the next line (`.. ` prompt appears).
+#
+# Exit:
+#   Type `quit`, `exit`, `q`, or `:q`; or press Ctrl-D (EOF) / Ctrl-C.
+#
+# History:
+#   Within a single `clido` invocation, turn 2+ continues the conversation
+#   (via `claude --continue`). Each new `clido` launch starts fresh.
+#   Continuation is scoped to the current working directory by Claude Code.
+
+set -euo pipefail
+
+# Trailing gap — one blank line after this script's output, TTY only, so piped
+# or redirected output stays exactly the data. Fires on every exit path.
+_gap() { [ -t 1 ] && printf '\n'; return 0; }
+trap _gap EXIT
+
+show_help() {
+    cat <<'HELP'
+clido — minimal interactive Claude REPL on top of `claude -p`
+
+USAGE
+  clido                       Start a new session in the current directory
+  clido -h, --help            Show this help
+
+INPUT
+  Type your query at the `> ` prompt, press Enter.
+  End a line with `\` to continue on the next line (`.. ` prompt appears).
+
+EXIT
+  Type `quit`, `exit`, `q`, or `:q`; or press Ctrl-D (EOF) / Ctrl-C.
+
+HISTORY
+  Within a single `clido` invocation, turn 2+ continues the conversation
+  (via `claude --continue`). Each new `clido` launch starts fresh.
+  Continuation is scoped to the current working directory by Claude Code.
+
+ENV
+  NO_COLOR    Set to disable colored prompts.
+HELP
+}
+
+case "${1:-}" in
+    -h|--help) show_help; exit 0 ;;
+esac
+
+# --- Pre-flight check ---------------------------------------------------
+if ! command -v claude >/dev/null 2>&1; then
+    printf "clido: 'claude' not found on PATH\n" >&2
+    exit 127
+fi
+
+# --- Colors (skip if NO_COLOR set or stdout isn't a TTY) ---------------
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+    C_PROMPT=$'\033[36m'    # cyan
+    C_DIM=$'\033[2m'
+    C_ERR=$'\033[31m'
+    C_RESET=$'\033[0m'
+else
+    C_PROMPT="" C_DIM="" C_ERR="" C_RESET=""
+fi
+
+# Clean exit on Ctrl-C — newline so the prompt doesn't smear
+trap 'printf "\n%sbye%s\n" "$C_DIM" "$C_RESET"; exit 0' INT
+
+# --- Greeting -----------------------------------------------------------
+printf "%sclido%s — interactive Claude session. Type %squit%s to exit, end lines with %s\\\\%s to continue.\n\n" \
+    "$C_DIM" "$C_RESET" "$C_PROMPT" "$C_RESET" "$C_PROMPT" "$C_RESET"
+
+# --- REPL loop ----------------------------------------------------------
+first=1
+while true; do
+    # Read a (possibly multi-line via trailing-backslash) input
+    query=""
+    cont=0
+    while true; do
+        if (( cont )); then
+            printf "%s.. %s" "$C_PROMPT" "$C_RESET"
+        else
+            printf "%s> %s"  "$C_PROMPT" "$C_RESET"
+        fi
+        if ! IFS= read -r line; then
+            # EOF (Ctrl-D)
+            printf "\n%sbye%s\n" "$C_DIM" "$C_RESET"
+            exit 0
+        fi
+        if [[ "$line" == *\\ ]]; then
+            query+="${line%\\}"$'\n'
+            cont=1
+        else
+            query+="$line"
+            break
+        fi
+    done
+
+    # Skip empty input (just pressing Enter)
+    [[ -z "$query" ]] && continue
+
+    # Exit commands
+    case "$query" in
+        quit|exit|q|:q)
+            printf "%sbye%s\n" "$C_DIM" "$C_RESET"
+            exit 0
+            ;;
+    esac
+
+    # Dispatch to claude -p. Turn 1 = fresh; turn 2+ = continue most recent.
+    if (( first )); then
+        if ! claude -p "$query"; then
+            printf "%s[clido: claude exited non-zero; try again]%s\n" "$C_ERR" "$C_RESET"
+            continue
+        fi
+        first=0
+    else
+        if ! claude -p --continue "$query"; then
+            printf "%s[clido: claude exited non-zero; try again]%s\n" "$C_ERR" "$C_RESET"
+            continue
+        fi
+    fi
+    printf "\n"
+done

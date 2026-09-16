@@ -1,0 +1,132 @@
+{
+  "skill_name": "mouter",
+  "evals": [
+    {
+      "id": 1,
+      "name": "schema-design",
+      "prompt": "Design the database schema for adding multi-tenant workspaces to our app \u2014 orgs, members, roles, and per-org billing. We're on Postgres. I want this solid before we build.",
+      "expected_output": "Routes schema_design to top/xhigh, queues second_opinion extra (top, background), one-line routing justification in window-burn framing, no model question asked.",
+      "files": [],
+      "assertions": [
+        "schema_design resolves to tier=top effort=xhigh (visible in script_calls resolve_model output)",
+        "second_opinion extra appears in the extras/dispatch plan as a background run",
+        "routing justification line present in window-burn framing; user is never asked which model to use"
+      ]
+    },
+    {
+      "id": 2,
+      "name": "lint-sweep",
+      "prompt": "ruff just flagged about 40 lint errors across src/ (unused imports, f-strings, line length). Clean them all up.",
+      "expected_output": "Routes to light/low (mechanical volume lane); explicitly avoids top-tier waste; may parallelize within fanout cap.",
+      "files": [
+        "src/"
+      ],
+      "assertions": [
+        "main lint work routed to light tier at low effort",
+        "no top or frontier tier appears in the dispatch plan for the lint work (no top-tier waste)",
+        "background extras stay within fanout_cap (3); the fresh cap of 5 is NOT self-declared (only 'throttle fresh' or a host window signal justifies it)"
+      ]
+    },
+    {
+      "id": 3,
+      "name": "unit-tests",
+      "prompt": "Write unit tests for src/utils.py \u2014 it has no coverage at all.",
+      "expected_output": "Routes unit_tests to mid/high, queues test_gap extra (mid, background).",
+      "files": [
+        "src/utils.py"
+      ],
+      "assertions": [
+        "unit_tests resolves to tier=mid effort=high",
+        "test_gap extra queued at mid tier OR explicitly skipped in one line as redundant with a test-writing main lane",
+        "background extras stay within fanout_cap (3); the fresh cap of 5 is NOT self-declared (only 'throttle fresh' or a host window signal justifies it)"
+      ]
+    },
+    {
+      "id": 4,
+      "name": "security-review",
+      "prompt": "Can you do a security review of our auth flow in src/app.py? Login, session tokens, password reset \u2014 the works.",
+      "expected_output": "Routes security_review to top (NOT frontier \u2014 adapter pin honored and mentioned), effort xhigh, queues security_sweep extra.",
+      "files": [
+        "src/app.py"
+      ],
+      "assertions": [
+        "security_review resolves to top tier, NOT frontier, with the adapter pin acknowledged",
+        "the frontier model appears nowhere in the security work's dispatch plan",
+        "security_sweep is either queued OR explicitly skipped in one line as redundant with the security_review main lane"
+      ]
+    },
+    {
+      "id": 5,
+      "name": "long-refactor",
+      "prompt": "We need to rip out the legacy config singleton and thread an explicit Config object through every module in src/ \u2014 it touches basically every file. Long haul, let's do it properly.",
+      "expected_output": "Routes refactor_long_multifile to frontier/high (main lane, interactive), queues background diff_review + docs_sync + edge_case_hunt within fanout cap; chat stays responsive.",
+      "files": [
+        "src/"
+      ],
+      "assertions": [
+        "refactor_long_multifile resolves to frontier/high and runs as the interactive main lane",
+        "background extras include diff_review and docs_sync (edge_case_hunt acceptable too), all background",
+        "background extras stay within fanout_cap (3); the fresh cap of 5 is NOT self-declared (only 'throttle fresh' or a host window signal justifies it)",
+        "lint_sweep-class extras resolve via --task boilerplate_scaffolding with no fallback_route bounce"
+      ]
+    },
+    {
+      "id": 6,
+      "name": "composite-feature",
+      "prompt": "Add a --format=json option to the report command, with unit tests, updated docs, and a changelog entry.",
+      "expected_output": "Decomposes to feature_well_scoped + unit_tests + docs_sync (+ release-notes-class changelog), each on its own tier; main lane interactive, light/mid lanes background; serialized writes to CHANGELOG.md.",
+      "files": [
+        "src/report.py"
+      ],
+      "assertions": [
+        "prompt decomposed into multiple task keys including feature_well_scoped, unit_tests, and docs_sync-class keys",
+        "each key resolved on its own tier per defaults (feature/tests on mid, docs/changelog on light)",
+        "shared-file (changelog) writes serialized or explicitly noted; main lane interactive, extras background",
+        "background extras stay within fanout_cap (3); the fresh cap of 5 is NOT self-declared (only 'throttle fresh' or a host window signal justifies it)"
+      ]
+    },
+    {
+      "id": 7,
+      "name": "short-feature",
+      "prompt": "Add a retry (3 attempts, exponential backoff) around the fetch_data call in src/utils.py.",
+      "expected_output": "Routes feature_well_scoped to mid/high with an explicit anti-overkill note (top would be quality-equivalent waste).",
+      "files": [
+        "src/utils.py"
+      ],
+      "assertions": [
+        "feature_well_scoped resolves to mid/high",
+        "response contains an explicit anti-overkill note (top/frontier would be quality-equivalent waste)",
+        "background extras stay within fanout_cap (3); the fresh cap of 5 is NOT self-declared (only 'throttle fresh' or a host window signal justifies it)"
+      ]
+    },
+    {
+      "id": 8,
+      "name": "state-gate-sequence",
+      "prompt": "Simulate this exact sequence of user turns, handling each per the skill, showing each turn's user-visible response: (a) bare '/mouter'; (b) 'refactor the error handling in src/app.py'; (c) '/mouter fix this race condition in src/utils.py'; (d) '/mouter status'; (e) bare '/mouter'; (f) 'add input validation to the report command'.",
+      "expected_output": "(a) toggles OFF with one-line confirm; (b) SILENT stand-down \u2014 no routing, no mention of mouter; (c) one-shot full pipeline, state stays OFF; (d) status card showing OFF; (e) toggles ON; (f) auto-routes with no model question.",
+      "files": [],
+      "assertions": [
+        "turn (a) toggles OFF with a one-line confirmation",
+        "turn (b) is a SILENT stand-down: no mention of mouter, routing, tiers, or models",
+        "turn (c) runs the full pipeline as a one-shot AND state remains OFF afterward",
+        "turn (d) status shows OFF plus a status card",
+        "turn (e) toggles back ON",
+        "turn (f) auto-routes with no model question asked"
+      ]
+    },
+    {
+      "id": 9,
+      "name": "throttle-low",
+      "prompt": "First handle the mouter command 'throttle low'. Then the user asks: 'implement the CSV export feature for the report module with tests'. Show the routing and extras behavior.",
+      "expected_output": "throttle persisted to low; extras shed per degradation_order (reduce, downband, defer) BEFORE main-lane quality; downgrades announced; main lane stays band-matched.",
+      "files": [
+        "src/report.py"
+      ],
+      "assertions": [
+        "throttle override persisted to low via mouter_state.py (visible in script_calls)",
+        "extras shed per degradation_order (reduced/downbanded/deferred) and the downgrade announced",
+        "main-lane routing stays band-matched (not degraded below its band)"
+      ]
+    }
+  ]
+}

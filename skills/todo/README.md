@@ -1,12 +1,16 @@
 # todo
 
-A personal todo list in a markdown file you choose.
+A personal todo list in a markdown file you choose. Needs: Python 3.
 
 ## Install
 
 ```bash
 d=~/.agents/skills; [ -d "$d" ]||d=~/.claude/skills; mkdir -p "$d" && curl -fsSL https://github.com/quixtop/quix/archive/main.tar.gz | tar -xz -C "$d" --strip-components=2 quix-main/skills/todo
 ```
+
+## Requires
+
+- [Python 3](https://www.python.org)
 
 ## Usage
 
@@ -17,3 +21,5 @@ Personal todo list manager backed by a configurable file (default ~/md/todo.md).
 ## Source
 
 `skills/todo` in [quixtop/quix](https://github.com/quixtop/quix) · author: shrix
+
+<!-- written by worx publish — edit freely; remove this line to keep your edits -->

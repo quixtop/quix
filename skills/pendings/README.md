@@ -17,3 +17,5 @@ End-of-session sweep of the CURRENT conversation for anything the user may have 
 ## Source
 
 `skills/pendings` in [quixtop/quix](https://github.com/quixtop/quix) · author: shrix
+
+<!-- written by worx publish — edit freely; remove this line to keep your edits -->

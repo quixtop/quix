@@ -1,12 +1,16 @@
 # skillsync
 
-Audit and repair the naming and identity convention across your skills.
+Audit and repair the naming and identity convention across your skills. Needs: Python 3.
 
 ## Install
 
 ```bash
 d=~/.agents/skills; [ -d "$d" ]||d=~/.claude/skills; mkdir -p "$d" && curl -fsSL https://github.com/quixtop/quix/archive/main.tar.gz | tar -xz -C "$d" --strip-components=2 quix-main/skills/skillsync
 ```
+
+## Requires
+
+- [Python 3](https://www.python.org)
 
 ## Usage
 
@@ -17,3 +21,5 @@ Audit & repair the shrix skill naming/identity convention (symlink, author, (shr
 ## Source
 
 `skills/skillsync` in [quixtop/quix](https://github.com/quixtop/quix) · author: shrix
+
+<!-- written by worx publish — edit freely; remove this line to keep your edits -->

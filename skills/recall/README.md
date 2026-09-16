@@ -17,3 +17,5 @@ Invoke it as `/recall` in Claude Code.
 ## Source
 
 `skills/recall` in [quixtop/quix](https://github.com/quixtop/quix) · author: shrix
+
+<!-- written by worx publish — edit freely; remove this line to keep your edits -->

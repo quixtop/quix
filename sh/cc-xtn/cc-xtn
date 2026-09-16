@@ -30,7 +30,6 @@ _gap() { [ -t 1 ] && printf '\n'; return 0; }
 trap _gap EXIT
 
 SETTINGS=~/.claude/settings.json
-SETTINGS_BAK=~/.claude/settings.json.bak
 # MCP servers live in ~/.claude.json, NOT settings.json — Claude Code reads
 # .mcpServers only from there. Pointing MCP at settings.json makes `list` show
 # none and makes enable/disable a no-op against a key nothing reads.

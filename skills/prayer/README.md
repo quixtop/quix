@@ -17,3 +17,5 @@ Re-read every rule in ~/.claude/rules/ and ~/.claude/CLAUDE.md in full and compl
 ## Source
 
 `skills/prayer` in [quixtop/quix](https://github.com/quixtop/quix) · author: shrix
+
+<!-- written by worx publish — edit freely; remove this line to keep your edits -->

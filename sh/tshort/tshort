@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+# (c) Shrix
+# author: shrix
+"""tshort — print the first t.co short link embedded in a tweet/X post.
+
+Asks for a tweet URL, then reads the post's entities back from Twitter's
+public syndication endpoint (no login/API key) and prints the first t.co
+URL as it appears in the tweet text. A pure-text tweet has no t.co.
+"""
+
+import atexit as _atexit, sys as _sys
+# Trailing gap — one blank line after output, TTY only, so piped or redirected
+# output stays exactly the data.
+_atexit.register(lambda: _sys.stdout.isatty() and print())
+import json
+import re
+import sys
+import urllib.error
+import urllib.request
+
+SYND = "https://cdn.syndication.twimg.com/tweet-result?id={id}&token=tshort"
+UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+)
+
+HELP = """tshort — print the first t.co short link embedded in a tweet/X post.
+
+usage:
+  tshort                 prompt for a tweet/X URL, then print its first t.co
+  tshort -h, --help      show this help
+
+A pure-text tweet (no links or media) has no t.co.
+"""
+
+
+def extract_id(url):
+    """Pull the numeric status id out of any twitter.com / x.com permalink."""
+    m = re.search(r"status(?:es)?/(\d+)", url)
+    return m.group(1) if m else None
+
+
+def fetch(tweet_id):
+    req = urllib.request.Request(SYND.format(id=tweet_id), headers={"User-Agent": UA})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        return json.load(r)
+
+
+def first_tco(data):
+    """First t.co in tweet order, scanning both link and media entities."""
+    ents = data.get("entities") or {}
+    found = []
+    for key in ("urls", "media"):
+        for e in ents.get(key) or []:
+            url = e.get("url")
+            if url:
+                pos = (e.get("indices") or [10**9])[0]
+                found.append((pos, url))
+    found.sort()
+    return found[0][1] if found else None
+
+
+def main():
+    if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help"):
+        print(HELP)
+        return 0
+
+    try:
+        url = input("> tweet-url ?  ").strip()
+    except EOFError:
+        print()
+        return 130
+
+    tweet_id = extract_id(url)
+    if not tweet_id:
+        print("  error: couldn't find a status id in that URL", file=sys.stderr)
+        return 1
+
+    try:
+        data = fetch(tweet_id)
+    except urllib.error.HTTPError as e:
+        print(
+            f"  error: fetch failed (HTTP {e.code}) — deleted, private, or wrong id?",
+            file=sys.stderr,
+        )
+        return 1
+    except (json.JSONDecodeError, ValueError):
+        print(
+            "  error: unexpected (non-JSON) response from syndication endpoint",
+            file=sys.stderr,
+        )
+        return 1
+    except Exception as e:
+        print(f"  error: {e}", file=sys.stderr)
+        return 1
+
+    tco = first_tco(data)
+    if tco:
+        print(f"> short-url =  {tco}")
+    else:
+        print("> short-url =  (none — tweet has no media/links)")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        print()
+        sys.exit(130)

@@ -177,7 +177,6 @@ if [ "${#BIDS[@]}" -eq 0 ]; then
 fi
 
 # Primary path/BID — kept for the single-value uses further down.
-APP_PATH="${APP_PATHS[0]:-}"
 BID="${BIDS[0]:-}"
 
 # ─── Safety guard: refuse system apps ──────────────────────────────────────
@@ -373,7 +372,6 @@ if [ "${#CANDS[@]}" -eq 0 ]; then
   # Dedup again
   if [ "${#CANDS[@]}" -gt 0 ]; then
     IFS=$'\n' read -r -d '' -a CANDS < <(printf '%s\n' "${CANDS[@]}" | awk '!seen[$0]++' && printf '\0')
-    DEEP_SCAN_USED=1
   fi
 fi
 

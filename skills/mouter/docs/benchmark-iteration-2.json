@@ -1,0 +1,454 @@
+{
+  "metadata": {
+    "skill_name": "mouter",
+    "skill_path": "<path/to/skill>",
+    "executor_model": "<model-name>",
+    "analyzer_model": "<model-name>",
+    "timestamp": "2026-07-03T19:19:04Z",
+    "evals_run": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "runs_per_configuration": 3
+  },
+  "runs": [
+    {
+      "eval_id": 1,
+      "configuration": "with_skill",
+      "run_number": 1,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 3,
+        "failed": 0,
+        "total": 3,
+        "time_seconds": 151.8,
+        "tokens": 64669,
+        "tool_calls": 0,
+        "errors": 0
+      },
+      "expectations": [
+        {
+          "text": "schema_design resolves to tier=top effort=xhigh (visible in script_calls resolve_model output)",
+          "passed": true,
+          "evidence": "script_calls.md step 4: '$ python3 scripts/resolve_model.py --task schema_design' -> 'task=schema_design tier=top effort=xhigh model=opus source=config'."
+        },
+        {
+          "text": "second_opinion extra appears in the extras/dispatch plan as a background run",
+          "passed": true,
+          "evidence": "response.md 'Amplifier extras' table row: 'second_opinion | second_opinion | mouter-architect | top | opus | high | background', plus rationale bullet 'second_opinion \u2014 schema decisions are its exact trigger'. Also resolved in script_calls.md step 5 (task=second_opinion tier=top effort=high model=opus)."
+        },
+        {
+          "text": "routing justification line present in window-burn framing; user is never asked which model to use",
+          "passed": true,
+          "evidence": "response.md opens with 'Routing: schema_design \u2192 top (opus) @ xhigh \u2014 ... the 2x window weight saved funds three background extras' (explicit window-burn framing). No question about model choice appears anywhere; script_calls.md confirms 'the user named no model, so config routing decided everything'."
+        }
+      ],
+      "notes": []
+    },
+    {
+      "eval_id": 2,
+      "configuration": "with_skill",
+      "run_number": 1,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 3,
+        "failed": 0,
+        "total": 3,
+        "time_seconds": 165.9,
+        "tokens": 64162,
+        "tool_calls": 0,
+        "errors": 0
+      },
+      "expectations": [
+        {
+          "text": "main lint work routed to light tier at low effort",
+          "passed": true,
+          "evidence": "script_calls.md step 3: 'task=boilerplate_scaffolding tier=light effort=low model=haiku source=config'; response.md dispatch table: 'Main | mouter-grunt | boilerplate_scaffolding | light \u2192 haiku | low | interactive'."
+        },
+        {
+          "text": "no top or frontier tier appears in the dispatch plan for the lint work (no top-tier waste)",
+          "passed": true,
+          "evidence": "Dispatch plan contains only two lanes: main at 'light \u2192 haiku' and one extra at 'mid \u2192 sonnet'. No top/opus or frontier/fable lane anywhere in the plan; escalation path mentions sonnet (mid) only."
+        },
+        {
+          "text": "background extras stay within fanout_cap (3); the fresh cap of 5 is NOT self-declared (only 'throttle fresh' or a host window signal justifies it)",
+          "passed": true,
+          "evidence": "Only 1 background extra queued ('1 of 3 used'); response.md: 'no manual throttle set and no verifiable freshness signal \u2192 standard fanout_cap: 3 applies ... fresh-cap raise not self-granted'; script_calls.md: 'no override, no verifiable fresh signal \u2192 cap 3, fresh cap 5 not applied'."
+        }
+      ],
+      "notes": []
+    },
+    {
+      "eval_id": 3,
+      "configuration": "with_skill",
+      "run_number": 1,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 3,
+        "failed": 0,
+        "total": 3,
+        "time_seconds": 177.7,
+        "tokens": 65373,
+        "tool_calls": 0,
+        "errors": 0
+      },
+      "expectations": [
+        {
+          "text": "unit_tests resolves to tier=mid effort=high",
+          "passed": true,
+          "evidence": "script_calls.md step 3: '$ python3 scripts/resolve_model.py --task unit_tests' -> 'task=unit_tests tier=mid effort=high model=sonnet source=config'."
+        },
+        {
+          "text": "test_gap extra queued at mid tier OR explicitly skipped in one line as redundant with a test-writing main lane",
+          "passed": true,
+          "evidence": "Reworded per redundancy rule (amplifiers.md): run explicitly skipped it in one line \u2014 'test_gap \u2014 redundant: the main lane IS the coverage work'"
+        },
+        {
+          "text": "background extras stay within fanout_cap (3); the fresh cap of 5 is NOT self-declared (only 'throttle fresh' or a host window signal justifies it)",
+          "passed": true,
+          "evidence": "Exactly 3 background extras queued (diff_review, edge_case_hunt, lint_sweep) \u2014 'within fanout_cap: 3'. script_calls.md step 2: throttle 'off' -> 'standard fanout_cap: 3 (fresh cap 5 not applicable \u2014 freshness never self-declared)'."
+        }
+      ],
+      "notes": []
+    },
+    {
+      "eval_id": 4,
+      "configuration": "with_skill",
+      "run_number": 1,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 3,
+        "failed": 0,
+        "total": 3,
+        "time_seconds": 151.2,
+        "tokens": 62786,
+        "tool_calls": 0,
+        "errors": 0
+      },
+      "expectations": [
+        {
+          "text": "security_review resolves to top tier, NOT frontier, with the adapter pin acknowledged",
+          "passed": true,
+          "evidence": "script_calls.md step 4: 'task=security_review tier=top effort=xhigh model=opus source=config'. Pin acknowledged in both files: response.md 'Adapter pin honored: security work caps at top, never frontier \u2014 Fable 5's safety classifiers make security routing to frontier unpredictable'; script_calls.md 'adapter pin (top, never frontier) honored'."
+        },
+        {
+          "text": "the frontier model appears nowhere in the security work's dispatch plan",
+          "passed": true,
+          "evidence": "Dispatch plan has exactly two lanes: security_review at top/opus and edge_case_hunt at mid/sonnet. Fable is mentioned only in the rationale for why frontier is avoided, never as a routed model in the plan."
+        },
+        {
+          "text": "security_sweep is either queued OR explicitly skipped in one line as redundant with the security_review main lane",
+          "passed": true,
+          "evidence": "response.md, single line under skipped extras: 'security_sweep \u2014 skipped: redundant; the main lane IS the security review.'"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "eval_id": 5,
+      "configuration": "with_skill",
+      "run_number": 1,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 4,
+        "failed": 0,
+        "total": 4,
+        "time_seconds": 213.5,
+        "tokens": 69019,
+        "tool_calls": 0,
+        "errors": 0
+      },
+      "expectations": [
+        {
+          "text": "refactor_long_multifile resolves to frontier/high and runs as the interactive main lane",
+          "passed": true,
+          "evidence": "script_calls.md step 3: 'task=refactor_long_multifile tier=frontier effort=high model=fable source=config'. response.md main-lane table: 'main lane | refactor_long_multifile | frontier | fable | high | interactive'."
+        },
+        {
+          "text": "background extras include diff_review and docs_sync (edge_case_hunt acceptable too), all background",
+          "passed": true,
+          "evidence": "Extras table includes 'diff_review | diff_review_routine | ... | background' (row 1) and 'docs_sync | docs_sync | ... | background' (row 6), plus edge_case_hunt (row 5). Every row's Lane column reads 'background'."
+        },
+        {
+          "text": "background extras stay within fanout_cap (3); the fresh cap of 5 is NOT self-declared (only 'throttle fresh' or a host window signal justifies it)",
+          "passed": true,
+          "evidence": "7 extras are queued but serialized into waves of at most 3 concurrent: 'fanout_cap = 3 concurrent, so two waves' with wave 1 = 3 extras, wave 2 = 3 extras, and tech_debt_notes 'serializes after docs_sync's wave only if a slot frees'. Queueing behind the cap satisfies the concurrency cap. Fresh raise not self-declared: script_calls.md step 2 'throttle off ... freshness NOT verifiable \u2192 fanout_cap = 3 applies (not fanout_cap_fresh = 5)'."
+        },
+        {
+          "text": "lint_sweep-class extras resolve via --task boilerplate_scaffolding with no fallback_route bounce",
+          "passed": true,
+          "evidence": "script_calls.md step 4 batch includes '--task boilerplate_scaffolding' resolving directly to 'task=boilerplate_scaffolding tier=light effort=low model=haiku source=config' \u2014 source=config, no fallback_route in any resolution output. Noted as 'proxy key for lint_sweep'."
+        }
+      ],
+      "notes": []
+    },
+    {
+      "eval_id": 6,
+      "configuration": "with_skill",
+      "run_number": 1,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 4,
+        "failed": 0,
+        "total": 4,
+        "time_seconds": 215.6,
+        "tokens": 71901,
+        "tool_calls": 0,
+        "errors": 0
+      },
+      "expectations": [
+        {
+          "text": "prompt decomposed into multiple task keys including feature_well_scoped, unit_tests, and docs_sync-class keys",
+          "passed": true,
+          "evidence": "response.md 'Classification (composite \u2192 4 task keys)' table: feature_well_scoped, unit_tests, docs_sync, release_notes (changelog mapped to release_notes with an explicit closest-key note). All four resolved in script_calls.md step 2."
+        },
+        {
+          "text": "each key resolved on its own tier per defaults (feature/tests on mid, docs/changelog on light)",
+          "passed": true,
+          "evidence": "script_calls.md step 2: 'task=feature_well_scoped tier=mid effort=high', 'task=unit_tests tier=mid effort=high', 'task=docs_sync tier=light effort=low', 'task=release_notes tier=light effort=low' \u2014 all source=config (shipped defaults; --table shows no customizations)."
+        },
+        {
+          "text": "shared-file (changelog) writes serialized or explicitly noted; main lane interactive, extras background",
+          "passed": true,
+          "evidence": "response.md step 3: docs_sync + release_notes 'batched into ONE run (both light/low; batching also honors the serialize-shared-files rule for README/changelog writes)'. Main lane rows 1-2 are marked 'interactive'; all extras (rows 3-6) are marked 'background'."
+        },
+        {
+          "text": "background extras stay within fanout_cap (3); the fresh cap of 5 is NOT self-declared (only 'throttle fresh' or a host window signal justifies it)",
+          "passed": true,
+          "evidence": "Exactly 3 amplifier extras queued ('fanout_cap = 3, all 3 slots used'); tech_debt_notes deferred at the cap with 'no verifiable fresh-window signal permits the raised cap of 5'. Throttle section: 'No throttle fresh and no host usage-window signal \u2192 the fresh fan-out raise (5) does NOT apply'."
+        }
+      ],
+      "notes": []
+    },
+    {
+      "eval_id": 7,
+      "configuration": "with_skill",
+      "run_number": 1,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 3,
+        "failed": 0,
+        "total": 3,
+        "time_seconds": 170.5,
+        "tokens": 65115,
+        "tool_calls": 0,
+        "errors": 0
+      },
+      "expectations": [
+        {
+          "text": "feature_well_scoped resolves to mid/high",
+          "passed": true,
+          "evidence": "script_calls.md step 2: '$ python3 $SKILL/scripts/resolve_model.py --task feature_well_scoped' -> 'task=feature_well_scoped tier=mid effort=high model=sonnet source=config'."
+        },
+        {
+          "text": "response contains an explicit anti-overkill note (top/frontier would be quality-equivalent waste)",
+          "passed": true,
+          "evidence": "response.md states WHY higher tiers would be waste, not just 'band audit clean': routing line 'frontier's lead vanishes on short scoped tasks, so mid is quality-equivalent at ~1/3 the window weight', reinforced by 'main lane at mid instead of frontier saves ~7x weight on the differentiated work' \u2014 an explicit quality-equivalence + wasted-weight argument against top/frontier."
+        },
+        {
+          "text": "background extras stay within fanout_cap (3); the fresh cap of 5 is NOT self-declared (only 'throttle fresh' or a host window signal justifies it)",
+          "passed": true,
+          "evidence": "4 extras planned but only 3 run concurrently: extra #4 lint_sweep is marked 'background (queued \u2014 starts when a cap slot frees)' \u2014 queueing behind the cap satisfies the concurrency cap. Fresh raise not self-declared: 'throttle: off, no verified-fresh signal \u2192 the fresh cap of 5 does NOT apply'; script_calls.md step 3 confirms 'freshness never self-declared'."
+        }
+      ],
+      "notes": []
+    },
+    {
+      "eval_id": 8,
+      "configuration": "with_skill",
+      "run_number": 1,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 6,
+        "failed": 0,
+        "total": 6,
+        "time_seconds": 252.6,
+        "tokens": 75283,
+        "tool_calls": 0,
+        "errors": 0
+      },
+      "expectations": [
+        {
+          "text": "turn (a) toggles OFF with a one-line confirmation",
+          "passed": true,
+          "evidence": "script_calls.md turn (a): 'mouter_state.py toggle' -> 'OFF'. response.md turn (a) is a single-line confirmation: 'mouter toggled OFF (was ON). Auto-routing is disabled; explicit /mouter <task> still runs one-shot, and status/set/table commands keep working.'"
+        },
+        {
+          "text": "turn (b) is a SILENT stand-down: no mention of mouter, routing, tiers, or models",
+          "passed": true,
+          "evidence": "The user-visible reply for (b) is only 'I'll refactor the error handling in src/app.py. Let me read the file first to see the current patterns.' \u2014 no mouter/routing/tier/model talk. The bracketed lines are explicitly labeled dry-run/eval annotations, not user-visible content. script_calls.md turn (b): 'OFF + not explicitly invoked \u2192 silent stand-down. No further script calls.'"
+        },
+        {
+          "text": "turn (c) runs the full pipeline as a one-shot AND state remains OFF afterward",
+          "passed": true,
+          "evidence": "Turn (c) runs the full pipeline (resolve_model for debugging_hard_novel top/xhigh plus three extras, dispatch plan with fan-out 3/3) framed as 'one-shot \u2014 mouter is OFF; this invocation only, global state unchanged' and 'mouter stays OFF after this task'. script_calls.md: 'ONE-SHOT full pipeline; global state left OFF (no state write)' \u2014 confirmed by turn (d) showing OFF."
+        },
+        {
+          "text": "turn (d) status shows OFF plus a status card",
+          "passed": true,
+          "evidence": "Turn (d) response: 'mouter: OFF \u00b7 throttle: off' followed by a status card covering routing table state (39 keys, 0 customizations), extras status, pending proposed diffs, and window estimate. Backed by script calls: get -> OFF, throttle get -> off, resolve_model.py --table."
+        },
+        {
+          "text": "turn (e) toggles back ON",
+          "passed": true,
+          "evidence": "script_calls.md turn (e): 'mouter_state.py toggle' -> 'ON'. response.md: 'mouter toggled ON (was OFF). Every qualifying prompt now auto-routes through the pipeline'."
+        },
+        {
+          "text": "turn (f) auto-routes with no model question asked",
+          "passed": true,
+          "evidence": "Turn (f) auto-routes ('add input validation...' -> feature_well_scoped mid/sonnet with 3 extras, security_review pinned top); no question about model choice appears anywhere in the turn. Turn (e)'s confirmation even states 'no model questions, ever'."
+        }
+      ],
+      "notes": []
+    },
+    {
+      "eval_id": 9,
+      "configuration": "with_skill",
+      "run_number": 1,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 3,
+        "failed": 0,
+        "total": 3,
+        "time_seconds": 124.0,
+        "tokens": 63913,
+        "tool_calls": 0,
+        "errors": 0
+      },
+      "expectations": [
+        {
+          "text": "throttle override persisted to low via mouter_state.py (visible in script_calls)",
+          "passed": true,
+          "evidence": "script_calls.md turn 1: '$ python3 scripts/mouter_state.py throttle low' -> 'low', followed by persistence proof: '$ cat references/state.json' -> '{\"enabled\": true, \"throttle\": \"low\"}'."
+        },
+        {
+          "text": "extras shed per degradation_order (reduced/downbanded/deferred) and the downgrade announced",
+          "passed": true,
+          "evidence": "response.md turn 2: 'Extras \u2014 throttled (low), first degradation step reduce_extras applied' \u2014 only 2 of 3 cap slots used, and 'Deferred (announced per announce_downgrades): test_gap ..., edge_case_hunt, docs_sync. Re-run any of these on request, or they resume when the throttle lifts.' script_calls.md notes: 'Throttle low honored via degradation_order[0] reduce_extras ... test_gap/edge_case_hunt/docs_sync deferred and announced.'"
+        },
+        {
+          "text": "main-lane routing stays band-matched (not degraded below its band)",
+          "passed": true,
+          "evidence": "Main lane stays at its resolved band mid/sonnet/high ('task=feature_well_scoped tier=mid effort=high', 'task=unit_tests tier=mid effort=high'); response.md: 'Band-matched despite the throttle: main lane never de-escalates while extras can drop first'; script_calls.md: 'main lane untouched (steps 2-4 of degradation_order not reached)'."
+        }
+      ],
+      "notes": []
+    },
+    {
+      "eval_id": 6,
+      "configuration": "without_skill",
+      "run_number": 1,
+      "result": {
+        "pass_rate": 0.0,
+        "passed": 0,
+        "failed": 3,
+        "total": 3,
+        "time_seconds": 59.2,
+        "tokens": 47676,
+        "tool_calls": 0,
+        "errors": 0
+      },
+      "expectations": [
+        {
+          "text": "prompt decomposed into multiple task keys including feature_well_scoped, unit_tests, and docs_sync-class keys",
+          "passed": false,
+          "evidence": "Baseline plans sequential steps (implementation, tests, docs, changelog) but uses no task-key vocabulary \u2014 no feature_well_scoped, unit_tests, or docs_sync keys appear"
+        },
+        {
+          "text": "each key resolved on its own tier per defaults (feature/tests on mid, docs/changelog on light)",
+          "passed": false,
+          "evidence": "No tier/model resolution at all: 'Default model/effort is fine; nothing here warrants an opus-level escalation' \u2014 everything runs inline on the session default"
+        },
+        {
+          "text": "shared-file (changelog) writes serialized or explicitly noted; main lane interactive, extras background",
+          "passed": false,
+          "evidence": "No background extras or lane split exists: 'I would do it inline in this session, sequentially, with no subagents'. No shared-file serialization concept is noted"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "eval_id": 7,
+      "configuration": "without_skill",
+      "run_number": 1,
+      "result": {
+        "pass_rate": 0.0,
+        "passed": 0,
+        "failed": 2,
+        "total": 2,
+        "time_seconds": 57.8,
+        "tokens": 47687,
+        "tool_calls": 0,
+        "errors": 0
+      },
+      "expectations": [
+        {
+          "text": "feature_well_scoped resolves to mid/high",
+          "passed": false,
+          "evidence": "No task-key classification or tier resolution occurs; the baseline plans the change inline with no model routing ('a subagent or model-effort decision would be overhead for nothing')"
+        },
+        {
+          "text": "response contains an explicit anti-overkill note (top/frontier would be quality-equivalent waste)",
+          "passed": false,
+          "evidence": "Closest statement is 'a subagent or model-effort decision would be overhead for nothing' \u2014 an anti-delegation note, not a claim that top/frontier tiers would be quality-equivalent waste; no tier/model comparison appears"
+        }
+      ],
+      "notes": []
+    }
+  ],
+  "run_summary": {
+    "with_skill": {
+      "pass_rate": {
+        "mean": 1.0,
+        "stddev": 0.0,
+        "min": 1.0,
+        "max": 1.0
+      },
+      "time_seconds": {
+        "mean": 180.3111,
+        "stddev": 39.8662,
+        "min": 124.0,
+        "max": 252.6
+      },
+      "tokens": {
+        "mean": 66913.4444,
+        "stddev": 4236.9262,
+        "min": 62786,
+        "max": 75283
+      }
+    },
+    "without_skill": {
+      "pass_rate": {
+        "mean": 0.0,
+        "stddev": 0.0,
+        "min": 0.0,
+        "max": 0.0
+      },
+      "time_seconds": {
+        "mean": 58.5,
+        "stddev": 0.9899,
+        "min": 57.8,
+        "max": 59.2
+      },
+      "tokens": {
+        "mean": 47681.5,
+        "stddev": 7.7782,
+        "min": 47676,
+        "max": 47687
+      }
+    },
+    "delta": {
+      "pass_rate": "+1.00",
+      "time_seconds": "+121.8",
+      "tokens": "+19232"
+    }
+  },
+  "notes": "ANALYST PASS (iteration 2): 32/32 after one assertion reword (eval-3 test_gap skip-as-redundant, mirroring the eval-4 rule). All three iteration-1 fixes verified: (1) no run self-declared a fresh window \u2014 all 9 held the concurrency cap at 3 and said so explicitly; (2) lint_sweep resolved via --task boilerplate_scaffolding with zero fallback_route bounces; (3) redundancy skips are stated in one line (eval-3 test_gap, eval-4 security_sweep, eval-5 second_opinion). Variance note: eval-5 queued 7 extras in serialized waves and eval-2 queued 1 \u2014 extras count now tracks task shape rather than self-granted budget, which is the intended behavior. Baselines carried over from iteration 1 unchanged (no-skill config identical). Remaining known limitation: simulated transcripts can't fully prove turn-level silence (eval-8b) \u2014 a live-session smoke test after install is the honest check."
+}

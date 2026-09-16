@@ -17,3 +17,5 @@ Log significant chat interactions from a dev session into the project chatlog (d
 ## Source
 
 `skills/chatlog` in [quixtop/quix](https://github.com/quixtop/quix) · author: shrix
+
+<!-- written by worx publish — edit freely; remove this line to keep your edits -->

@@ -1,0 +1,434 @@
+{
+  "metadata": {
+    "skill_name": "mouter",
+    "skill_path": "<path/to/skill>",
+    "executor_model": "<model-name>",
+    "analyzer_model": "<model-name>",
+    "timestamp": "2026-07-03T18:37:28Z",
+    "evals_run": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "runs_per_configuration": 3
+  },
+  "runs": [
+    {
+      "eval_id": 1,
+      "configuration": "with_skill",
+      "run_number": 1,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 3,
+        "failed": 0,
+        "total": 3,
+        "time_seconds": 146.8,
+        "tokens": 63295,
+        "tool_calls": 0,
+        "errors": 0
+      },
+      "expectations": [
+        {
+          "text": "schema_design resolves to tier=top effort=xhigh (visible in script_calls resolve_model output)",
+          "passed": true,
+          "evidence": "script_calls.md step 3: 'task=schema_design tier=top effort=xhigh model=opus source=config'"
+        },
+        {
+          "text": "second_opinion extra appears in the extras/dispatch plan as a background run",
+          "passed": true,
+          "evidence": "Amplifiers table row 1: 'second_opinion | mouter-architect | second_opinion | top | opus | high | background', with a dedicated brief for it"
+        },
+        {
+          "text": "routing justification line present in window-burn framing; user is never asked which model to use",
+          "passed": true,
+          "evidence": "Routing line: 'skipping frontier saves ~2x window burn; the surplus buys three background extras'. No question about model choice appears anywhere in response.md"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "eval_id": 2,
+      "configuration": "with_skill",
+      "run_number": 1,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 3,
+        "failed": 0,
+        "total": 3,
+        "time_seconds": 149.9,
+        "tokens": 62973,
+        "tool_calls": 0,
+        "errors": 0
+      },
+      "expectations": [
+        {
+          "text": "main lint work routed to light tier at low effort",
+          "passed": true,
+          "evidence": "script_calls.md: 'task=boilerplate_scaffolding tier=light effort=low model=haiku source=config'; dispatch table row 1: mouter-grunt, light, haiku, low, interactive main lane"
+        },
+        {
+          "text": "no top or frontier tier appears in the dispatch plan for the lint work (no top-tier waste)",
+          "passed": true,
+          "evidence": "Dispatch plan contains only light (haiku) and mid (sonnet diff_review_routine); no top/frontier lane. Escalation path mentioned is one tier up to sonnet (mid), not top"
+        },
+        {
+          "text": "parallel dispatch stays within fanout_cap (3)",
+          "passed": true,
+          "evidence": "'Fan-out: 2 of 3 cap used (serialized anyway)' \u2014 2 lanes total, and the review is serialized after the main lane"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "eval_id": 3,
+      "configuration": "with_skill",
+      "run_number": 1,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 2,
+        "failed": 0,
+        "total": 2,
+        "time_seconds": 153.4,
+        "tokens": 65062,
+        "tool_calls": 0,
+        "errors": 0
+      },
+      "expectations": [
+        {
+          "text": "unit_tests resolves to tier=mid effort=high",
+          "passed": true,
+          "evidence": "script_calls.md step 3: 'task=unit_tests tier=mid effort=high model=sonnet source=config'"
+        },
+        {
+          "text": "test_gap extra queued as a background run at mid tier",
+          "passed": true,
+          "evidence": "Extras table row 2: 'test_gap cross-check... test_gap_analysis... mid / sonnet... background... serialized after main lane'; script_calls: 'task=test_gap_analysis tier=mid effort=high model=sonnet source=config'"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "eval_id": 4,
+      "configuration": "with_skill",
+      "run_number": 1,
+      "result": {
+        "pass_rate": 0.667,
+        "passed": 2,
+        "failed": 1,
+        "total": 3,
+        "time_seconds": 166.6,
+        "tokens": 63316,
+        "tool_calls": 0,
+        "errors": 0
+      },
+      "expectations": [
+        {
+          "text": "security_review resolves to top tier, NOT frontier, with the adapter pin acknowledged",
+          "passed": true,
+          "evidence": "script_calls.md: 'task=security_review tier=top effort=xhigh model=opus source=config'; response: 'Adapter pin honored: security_review -> top, never frontier (Claude adapter)'"
+        },
+        {
+          "text": "the frontier model appears nowhere in the security work's dispatch plan",
+          "passed": true,
+          "evidence": "Dispatch plan lanes are top/opus (main) + two mid/sonnet extras; fable appears only in the justification narrative ('never Fable'), never as a dispatched lane"
+        },
+        {
+          "text": "security_sweep extra queued",
+          "passed": false,
+          "evidence": "security_sweep was explicitly NOT queued: 'Extras skipped (applicability rules): security_sweep (redundant \u2014 the main lane IS the security review)'. The queued extras were edge_case_hunt and test_gap_analysis instead"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "eval_id": 5,
+      "configuration": "with_skill",
+      "run_number": 1,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 3,
+        "failed": 0,
+        "total": 3,
+        "time_seconds": 264.8,
+        "tokens": 74484,
+        "tool_calls": 0,
+        "errors": 0
+      },
+      "expectations": [
+        {
+          "text": "refactor_long_multifile resolves to frontier/high and runs as the interactive main lane",
+          "passed": true,
+          "evidence": "script_calls.md: 'task=refactor_long_multifile tier=frontier effort=high model=fable source=config'; main-lane table: 'refactor_long_multifile | frontier | fable | high | interactive'"
+        },
+        {
+          "text": "background extras include diff_review and docs_sync (edge_case_hunt acceptable too), all background",
+          "passed": true,
+          "evidence": "Amplifiers table lists diff_review (diff_review_high_stakes, background), docs_sync (#6 queued, background), plus edge_case_hunt (#4, background); every extra row is marked 'background'"
+        },
+        {
+          "text": "total concurrent background extras within fanout_cap (3)",
+          "passed": true,
+          "evidence": "FLAG: 5 extras launch in parallel ('Extras 1-5 launch in parallel once the refactor diff exists'), exceeding cap 3 \u2014 but the run explicitly invoked the fresh-window cap: 'window fresh -> fan-out cap 5' / 'fan-out raised to the fresh cap of 5'. Counted against cap 5: 5 concurrent <= 5. Passes only via the fresh-window escape hatch"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "eval_id": 6,
+      "configuration": "with_skill",
+      "run_number": 1,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 3,
+        "failed": 0,
+        "total": 3,
+        "time_seconds": 167.0,
+        "tokens": 68502,
+        "tool_calls": 0,
+        "errors": 0
+      },
+      "expectations": [
+        {
+          "text": "prompt decomposed into multiple task keys including feature_well_scoped, unit_tests, and docs_sync-class keys",
+          "passed": true,
+          "evidence": "Classification table decomposes into 4 keys: feature_well_scoped, unit_tests, docs_sync, release_notes; script_calls resolves all four in one resolve_model.py call"
+        },
+        {
+          "text": "each key resolved on its own tier per defaults (feature/tests on mid, docs/changelog on light)",
+          "passed": true,
+          "evidence": "script_calls.md: 'feature_well_scoped tier=mid', 'unit_tests tier=mid', 'docs_sync tier=light', 'release_notes tier=light' \u2014 all source=config (shipped defaults)"
+        },
+        {
+          "text": "shared-file (changelog) writes serialized or explicitly noted; main lane interactive, extras background",
+          "passed": true,
+          "evidence": "release_notes lane: '(serialized append \u2014 shared-file rule; never concurrent with any other CHANGELOG writer)'; main lane marked 'interactive', all other lanes marked 'background'"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "eval_id": 7,
+      "configuration": "with_skill",
+      "run_number": 1,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 2,
+        "failed": 0,
+        "total": 2,
+        "time_seconds": 173.0,
+        "tokens": 64014,
+        "tool_calls": 0,
+        "errors": 0
+      },
+      "expectations": [
+        {
+          "text": "feature_well_scoped resolves to mid/high",
+          "passed": true,
+          "evidence": "script_calls.md step 2: 'task=feature_well_scoped tier=mid effort=high model=sonnet source=config'"
+        },
+        {
+          "text": "response contains an explicit anti-overkill note (top/frontier would be quality-equivalent waste)",
+          "passed": true,
+          "evidence": "Routing line: 'a short, single-file retry wrapper is squarely in Sonnet's band (Fable/Opus lead vanishes on short scoped tasks), so routing at 3x weight instead of 5-10x frees window' \u2014 explicitly names top/frontier models as adding no quality at higher burn; band audit adds 'no cross-file architecture to warrant top'"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "eval_id": 8,
+      "configuration": "with_skill",
+      "run_number": 1,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 6,
+        "failed": 0,
+        "total": 6,
+        "time_seconds": 190.3,
+        "tokens": 64967,
+        "tool_calls": 0,
+        "errors": 0
+      },
+      "expectations": [
+        {
+          "text": "turn (a) toggles OFF with a one-line confirmation",
+          "passed": true,
+          "evidence": "script_calls turn (a): 'mouter_state.py toggle -> OFF'; response (a) is a single line: 'mouter toggled OFF \u2014 routing, extras, and background agents stand down; explicit /mouter <task> still works one-shot.'"
+        },
+        {
+          "text": "turn (b) is a SILENT stand-down: no mention of mouter, routing, tiers, or models",
+          "passed": true,
+          "evidence": "The user-visible response (b) is plain: 'I'll refactor the error handling in src/app.py. Let me read the file first...' \u2014 no mouter/routing/tier/model terms. The stand-down explanation appears only as a transcript annotation outside the quoted user-visible reply; script log confirms 'No further mouter scripts run this turn'"
+        },
+        {
+          "text": "turn (c) runs the full pipeline as a one-shot AND state remains OFF afterward",
+          "passed": true,
+          "evidence": "Turn (c) runs state gate, throttle check, resolve_model (debugging_hard_novel top/opus/xhigh) and prints a full dispatch plan with extras; script log: 'one-shot pipeline; global state left OFF (no state write)' \u2014 turn (d) then reads state as OFF"
+        },
+        {
+          "text": "turn (d) status shows OFF plus a status card",
+          "passed": true,
+          "evidence": "Response (d): 'mouter: OFF (explicit commands still work...)' followed by a card covering routing table (38 keys, no customizations), adapter+pins, extras 8/8, and window/throttle state"
+        },
+        {
+          "text": "turn (e) toggles back ON",
+          "passed": true,
+          "evidence": "script_calls turn (e): 'mouter_state.py toggle -> ON'; response: 'mouter toggled ON \u2014 every qualifying prompt now auto-routes'"
+        },
+        {
+          "text": "turn (f) auto-routes with no model question asked",
+          "passed": true,
+          "evidence": "Turn (f) resolves feature_well_scoped + unit_tests to sonnet@high and prints the dispatch plan directly; no question about model/tier choice appears in the response"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "eval_id": 9,
+      "configuration": "with_skill",
+      "run_number": 1,
+      "result": {
+        "pass_rate": 1.0,
+        "passed": 3,
+        "failed": 0,
+        "total": 3,
+        "time_seconds": 138.0,
+        "tokens": 61721,
+        "tool_calls": 0,
+        "errors": 0
+      },
+      "expectations": [
+        {
+          "text": "throttle override persisted to low via mouter_state.py (visible in script_calls)",
+          "passed": true,
+          "evidence": "script_calls.md: '$ python3 scripts/mouter_state.py throttle low -> low' with resulting state.json '{\"enabled\": true, \"throttle\": \"low\"}'"
+        },
+        {
+          "text": "extras shed per degradation_order (reduced/downbanded/deferred) and the downgrade announced",
+          "passed": true,
+          "evidence": "Response turn 2 announces: 'Extras \u2014 throttled (low)... Degradation step 1 (reduce) and step 3 (defer) apply: KEEP diff_review... KEEP lint_sweep... DEFER test_gap... DEFER edge_case_hunt, docs_sync, tech_debt_notes', with downband explicitly considered ('no downband needed \u2014 already mid'); turn 1 announces the degradation_order to the user"
+        },
+        {
+          "text": "main-lane routing stays band-matched (not degraded below its band)",
+          "passed": true,
+          "evidence": "Main lane keeps its resolved band: 'Main lane (interactive, never de-escalated \u2014 extras drop first): sonnet @ effort high' matching resolve_model output 'feature_well_scoped tier=mid effort=high'; turn 1 states 'Main-lane routing itself is untouched'"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "eval_id": 6,
+      "configuration": "without_skill",
+      "run_number": 1,
+      "result": {
+        "pass_rate": 0.0,
+        "passed": 0,
+        "failed": 3,
+        "total": 3,
+        "time_seconds": 59.2,
+        "tokens": 47676,
+        "tool_calls": 0,
+        "errors": 0
+      },
+      "expectations": [
+        {
+          "text": "prompt decomposed into multiple task keys including feature_well_scoped, unit_tests, and docs_sync-class keys",
+          "passed": false,
+          "evidence": "Baseline plans sequential steps (implementation, tests, docs, changelog) but uses no task-key vocabulary \u2014 no feature_well_scoped, unit_tests, or docs_sync keys appear"
+        },
+        {
+          "text": "each key resolved on its own tier per defaults (feature/tests on mid, docs/changelog on light)",
+          "passed": false,
+          "evidence": "No tier/model resolution at all: 'Default model/effort is fine; nothing here warrants an opus-level escalation' \u2014 everything runs inline on the session default"
+        },
+        {
+          "text": "shared-file (changelog) writes serialized or explicitly noted; main lane interactive, extras background",
+          "passed": false,
+          "evidence": "No background extras or lane split exists: 'I would do it inline in this session, sequentially, with no subagents'. No shared-file serialization concept is noted"
+        }
+      ],
+      "notes": []
+    },
+    {
+      "eval_id": 7,
+      "configuration": "without_skill",
+      "run_number": 1,
+      "result": {
+        "pass_rate": 0.0,
+        "passed": 0,
+        "failed": 2,
+        "total": 2,
+        "time_seconds": 57.8,
+        "tokens": 47687,
+        "tool_calls": 0,
+        "errors": 0
+      },
+      "expectations": [
+        {
+          "text": "feature_well_scoped resolves to mid/high",
+          "passed": false,
+          "evidence": "No task-key classification or tier resolution occurs; the baseline plans the change inline with no model routing ('a subagent or model-effort decision would be overhead for nothing')"
+        },
+        {
+          "text": "response contains an explicit anti-overkill note (top/frontier would be quality-equivalent waste)",
+          "passed": false,
+          "evidence": "Closest statement is 'a subagent or model-effort decision would be overhead for nothing' \u2014 an anti-delegation note, not a claim that top/frontier tiers would be quality-equivalent waste; no tier/model comparison appears"
+        }
+      ],
+      "notes": []
+    }
+  ],
+  "run_summary": {
+    "with_skill": {
+      "pass_rate": {
+        "mean": 0.963,
+        "stddev": 0.111,
+        "min": 0.667,
+        "max": 1.0
+      },
+      "time_seconds": {
+        "mean": 172.2,
+        "stddev": 38.1231,
+        "min": 138.0,
+        "max": 264.8
+      },
+      "tokens": {
+        "mean": 65370.4444,
+        "stddev": 3914.0097,
+        "min": 61721,
+        "max": 74484
+      }
+    },
+    "without_skill": {
+      "pass_rate": {
+        "mean": 0.0,
+        "stddev": 0.0,
+        "min": 0.0,
+        "max": 0.0
+      },
+      "time_seconds": {
+        "mean": 58.5,
+        "stddev": 0.9899,
+        "min": 57.8,
+        "max": 59.2
+      },
+      "tokens": {
+        "mean": 47681.5,
+        "stddev": 7.7782,
+        "min": 47676,
+        "max": 47687
+      }
+    },
+    "delta": {
+      "pass_rate": "+0.96",
+      "time_seconds": "+113.7",
+      "tokens": "+17689"
+    }
+  },
+  "notes": "ANALYST PASS (iteration 1): (1) Only with-skill failure is an eval-authoring bug, not a skill bug: eval-4 asserted 'security_sweep queued' but the run correctly skipped it as redundant when the main lane IS the security review; reword the assertion. (2) NON-DETERMINISM FOUND: the 'fresh window' heuristic is self-declared \u2014 5 of 9 runs called the window fresh and used fanout_cap_fresh=5, eval-1 used cap 3. This neutralizes every cap-3 expectation. Fix: deterministic freshness (only explicit 'throttle fresh' or a host-provided window signal). (3) lint_sweep/tech_debt_notes have no first-class routing keys \u2014 eval-5 bounced off fallback_route noise before re-resolving via boilerplate_scaffolding; amplifiers.md should name the exact --task key per extra. (4) Baseline 0% is by construction (no skill = no routing), so the delta measures existence, not quality \u2014 the qualitative outputs are the real signal here. (5) Routing overhead in dry-run: ~+17.7k tokens / +114s vs baseline \u2014 the cost of the state gate + adapter + resolver calls; acceptable for a router, worth keeping lean. (6) Deterministic core (pins, band audits, one-band fallback, state gate) behaved identically across all 9 runs \u2014 variance is confined to the judgment layer (freshness, extras applicability)."
+}

@@ -78,7 +78,7 @@ fi
 # sends the user hunting for a tab that isn't there — measured 19Aug26.
 if pids=$(pgrep -x nvim 2>/dev/null) && [[ -n "$pids" ]] && [[ "$force" == false ]]; then
   status warn "nvim is running — its swap files are live crash-recovery data"
-  # shellcheck disable=SC2086
+  # shellcheck disable=SC2046   # the pid list is meant to split into ps -p arguments
   ps -o pid=,stat=,args= -p $(echo "$pids" | tr '\n' ',' | sed 's/,$//') 2>/dev/null |
     while read -r pid stat args; do
       case "$stat" in

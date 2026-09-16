@@ -17,3 +17,5 @@ Ship recent dev changes wherever they run — restart a service, build a client 
 ## Source
 
 `skills/dep` in [quixtop/quix](https://github.com/quixtop/quix) · author: shrix
+
+<!-- written by worx publish — edit freely; remove this line to keep your edits -->

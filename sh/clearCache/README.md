@@ -1,12 +1,16 @@
 # clearCache
 
-Reclaim disk by deleting app caches only — never data.
+Reclaim disk by deleting app caches only — never data. Needs: proj-env.sh.
 
 ## Install
 
 ```bash
 mkdir -p ~/.local/bin && curl -fsSL https://raw.githubusercontent.com/quixtop/quix/main/sh/clearCache/clearCache -o ~/.local/bin/clearCache && chmod +x ~/.local/bin/clearCache
 ```
+
+## Requires
+
+- [proj-env.sh](https://github.com/quixtop/quix/blob/main/sh/proj-env.sh/README.md) — sourced at start
 
 ## Usage
 
@@ -54,3 +58,5 @@ Safety:
 ## Source
 
 `sh/clearCache` in [quixtop/quix](https://github.com/quixtop/quix) · author: shrix
+
+<!-- written by worx publish — edit freely; remove this line to keep your edits -->
