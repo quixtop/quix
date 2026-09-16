@@ -1,0 +1,1127 @@
+#!/bin/bash
+# (c) Shrix
+# author: shrix
+# syschk.sh — macOS System Diagnostics
+# Detects CPU hogs, ghost/orphaned processes, memory pressure, thermal throttling,
+# disk pressure, suspicious launch agents, network anomalies, and Claude Code ecosystem issues.
+#
+# Usage:
+#   syschk.sh              # Full report
+#   syschk.sh -q           # Quick scan (CPU + memory + thermal)
+#   syschk.sh -v           # Verbose (extra detail)
+#   syschk.sh --cpu        # CPU section only
+#   syschk.sh --mem        # Memory section only
+#   syschk.sh --proc       # Process analysis only
+#   syschk.sh --disk       # Disk section only
+#   syschk.sh --net        # Network section only
+#   syschk.sh --therm      # Thermal section only
+#   syschk.sh --fix        # Plan + one confirmation, then apply safe fixes
+
+# --- Colors (disabled if piped) ---
+
+# Trailing gap — one blank line after this script's output, TTY only, so piped
+# or redirected output stays exactly the data. Fires on every exit path.
+_gap() { [ -t 1 ] && printf '\n'; return 0; }
+trap _gap EXIT
+if [[ -t 1 ]]; then
+  RED='\033[0;31m'; YELLOW='\033[0;33m'; GREEN='\033[0;32m'
+  CYAN='\033[0;36m'; BOLD='\033[1m'; DIM='\033[2m'; NC='\033[0m'
+else
+  RED=''; YELLOW=''; GREEN=''; CYAN=''; BOLD=''; DIM=''; NC=''
+fi
+
+# --- Globals ---
+NCPU=$(sysctl -n hw.ncpu 2>/dev/null || echo 8)
+TOTAL_MEM_BYTES=$(sysctl -n hw.memsize 2>/dev/null || echo 0)
+TOTAL_MEM_GB=$(( TOTAL_MEM_BYTES / 1073741824 ))
+TOTAL_WARNS=0
+TOTAL_CRITS=0
+VERBOSE=false
+
+# Section flags (all true by default)
+RUN_CPU=true; RUN_MEM=true; RUN_PROC=true; RUN_THERM=true
+RUN_DISK=true; RUN_AGENTS=true; RUN_NET=true; RUN_CLAUDE=true
+
+# --- What counts as a Claude Code process -----------------------------------
+# `ps -o comm=` reports an executable's BASENAME, and Claude Code installs its
+# binary named by version — ~/.local/share/claude/versions/2.1.241, and another
+# under Application Support/Claude/claude-code/<ver>/claude.app. So a running
+# session shows up as `2.1.241`, `2.1.243`, `2.1.246`, never as `claude`.
+#
+# Measured 26-Aug-2026: a jetsam log listed `2.1.241` beside `claude`, and lsof
+# showed `2.1.243` holding 12 connections, while this section reported
+# "No Claude Code or dev tool processes running".
+#
+# ⚠️ Every site that asks "is this a claude process?" must use these, not a
+# literal ^claude$. Getting it wrong is not cosmetic: the orphan detector
+# raises `kill <pid>` classed `safe`, which --fix will auto-run, so a
+# version-named session that matched neither test would be offered for killing.
+CLAUDE_COMM_RE='^(claude|[0-9]+\.[0-9]+\.[0-9]+)$'
+DEV_COMM_RE='^(claude|[0-9]+\.[0-9]+\.[0-9]+|bun|node|rg|esbuild|npx|tsx|deno)$'
+
+# --- Process snapshot (captured once, used by all checks) ---
+PS_SNAPSHOT=""
+
+# Capability flags — set by capture_snapshot. A sandboxed run (e.g. a Claude
+# Code Bash tool) can exec vm_stat/df/pmset but NOT ps/sysctl, so measure what
+# is reachable and mark the rest NOT MEASURED rather than refusing outright.
+HAVE_PS=1
+HAVE_SYSCTL=1
+SKIPPED_COUNT=0
+
+# --- Report card tracking ---
+# Per-section grades (simple vars, bash 3.2 compatible)
+GRADE_CPU=ok; GRADE_Processes=ok; GRADE_Memory=ok; GRADE_Thermal=ok
+GRADE_Disk=ok; GRADE_Agents=ok; GRADE_Network=ok; GRADE_Claude=ok
+
+# Remediation suggestions
+REMEDIATIONS=()
+FIX_CMD=()      # the command alone, for --fix
+FIX_WHY=()      # the human reason
+FIX_CLASS=()    # safe | risky | manual — see add_fix
+FIX_COUNT=0
+RUN_FIX=false
+
+grade_section() {
+  # Usage: grade_section "CPU" "crit"
+  # Only escalate, never downgrade (crit > warn > ok)
+  local section="$1" level="$2"
+  local varname="GRADE_${section}"
+  local current="${!varname}"
+  case "$level" in
+    crit) eval "$varname=crit" ;;
+    warn) [[ "$current" != "crit" ]] && eval "$varname=warn" ;;
+    # skip = the section never ran, and MUST stay distinct from ok — an
+    # unmeasured section rendering as HEALTHY is the false reassurance this
+    # script exists to refuse.
+    skip) eval "$varname=skip" ;;
+  esac
+}
+
+skip_section() {
+  # Usage: skip_section "CPU ANALYSIS" CPU "ps"
+  header "$1"
+  echo -e "  ${DIM}[SKIP] $3 unavailable in this environment — not measured${NC}"
+  grade_section "$2" "skip"
+  (( SKIPPED_COUNT++ )) || true
+}
+
+add_fix() {
+  # Usage: add_fix "kill 1234" "stuck rg (660% CPU)" [safe|risky|manual]
+  #
+  # The class decides what --fix may execute, and it DEFAULTS TO manual so a
+  # future add_fix call that forgets the argument can never be auto-run:
+  #   safe   — target is definitionally dead weight (parent gone, ghost group,
+  #            stuck search). Removing it cannot destroy work in progress.
+  #   risky  — a live process matched only by a CPU threshold. That is equally
+  #            a build, an encode, or a test run; killing it destroys work.
+  #   manual — advice or a diagnostic, not a runnable fix.
+  # Two detectors can legitimately reach the same conclusion — check_orphans
+  # and check_claude_ecosystem both flag a PPID=1 worker with no session, so
+  # the same `kill <pid>` arrived twice. Keep the first, drop the repeat: the
+  # duplicate inflates the critical count and its second run always fails
+  # against an already-dead PID.
+  local _i
+  for ((_i = 0; _i < FIX_COUNT; _i++)); do
+    [[ "${FIX_CMD[$_i]}" == "$1" ]] && return 0
+  done
+
+  REMEDIATIONS[$FIX_COUNT]="$1  ← $2"
+  FIX_CMD[$FIX_COUNT]="$1"
+  FIX_WHY[$FIX_COUNT]="$2"
+  FIX_CLASS[$FIX_COUNT]="${3:-manual}"
+  ((FIX_COUNT++))
+}
+
+# --- Helpers ---
+# Single arg: treated as plain string (safe from % in content)
+# Multi arg: first arg is printf format, rest are values
+_emit() {
+  local prefix="$1"; shift
+  if (( $# == 1 )); then
+    echo -e "${prefix}$1"
+  else
+    printf "${prefix}"; printf "$@"; echo
+  fi
+}
+warn()  { ((TOTAL_WARNS++)); _emit "  ${YELLOW}[WARN]${NC} " "$@"; }
+crit()  { ((TOTAL_CRITS++)); _emit "  ${RED}[CRIT]${NC} " "$@"; }
+ok()    { _emit "  ${GREEN}[OK]${NC}   " "$@"; }
+info()  { _emit "  ${CYAN}[INFO]${NC} " "$@"; }
+header() { printf "\n${BOLD}=== %s ===${NC}\n" "$*"; }
+
+parse_elapsed() {
+  # Parse ps ELAPSED format (DD-HH:MM:SS or HH:MM:SS or MM:SS or SS) to seconds
+  local e="$1"
+  local days=0 hours=0 mins=0 secs=0
+  if [[ "$e" == *-* ]]; then
+    days="${e%%-*}"; e="${e#*-}"
+  fi
+  IFS=':' read -ra parts <<< "$e"
+  case ${#parts[@]} in
+    3) hours="${parts[0]}"; mins="${parts[1]}"; secs="${parts[2]}" ;;
+    2) mins="${parts[0]}"; secs="${parts[1]}" ;;
+    1) secs="${parts[0]}" ;;
+  esac
+  # Strip leading zeros to avoid octal interpretation
+  days=$((10#$days)); hours=$((10#$hours)); mins=$((10#$mins)); secs=$((10#$secs))
+  echo $(( days*86400 + hours*3600 + mins*60 + secs ))
+}
+
+# --- Argument parsing ---
+parse_args() {
+  # If any specific section is requested, turn all others off
+  local specific=false
+  for arg in "$@"; do
+    case "$arg" in --cpu|--mem|--proc|--disk|--net|--therm) specific=true ;; esac
+  done
+  if $specific; then
+    RUN_CPU=false; RUN_MEM=false; RUN_PROC=false; RUN_THERM=false
+    RUN_DISK=false; RUN_AGENTS=false; RUN_NET=false; RUN_CLAUDE=false
+  fi
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -q|--quick|quick)
+        RUN_CPU=true; RUN_MEM=true; RUN_THERM=true
+        RUN_PROC=false; RUN_DISK=false; RUN_AGENTS=false; RUN_NET=false; RUN_CLAUDE=false
+        shift ;;
+      -v|--verbose|verbose) VERBOSE=true; shift ;;
+      --fix|fix|--optimize|optimize) RUN_FIX=true; shift ;;
+      --cpu|cpu) RUN_CPU=true; shift ;;
+      --mem|mem|memory) RUN_MEM=true; shift ;;
+      --proc|proc|processes) RUN_PROC=true; RUN_CLAUDE=true; shift ;;
+      --disk|disk|storage) RUN_DISK=true; shift ;;
+      --net|net|network) RUN_NET=true; shift ;;
+      --therm|therm|thermal) RUN_THERM=true; shift ;;
+      -h|--help)
+        echo "syschk — macOS System Diagnostics"
+        echo ""
+        echo "Usage: $0 [OPTIONS]"
+        echo ""
+        echo "Options:"
+        echo "  -q, --quick     Quick scan (CPU + memory + thermal)"
+        echo "  -v, --verbose   Extra detail (process trees, full lsof)"
+        echo "  --cpu           CPU analysis only"
+        echo "  --mem           Memory analysis only"
+        echo "  --proc          Process analysis (orphans + zombies + claude ecosystem)"
+        echo "  --disk          Disk usage only"
+        echo "  --net           Network analysis only"
+        echo "  --therm         Thermal state only"
+        echo "  --fix           Show a fix plan, confirm once, apply the safe ones"
+        echo "  -h, --help      Show this help"
+        exit 0 ;;
+      *)
+        echo -e "${RED}Unknown option: $1${NC}"
+        echo "Use -h or --help for usage"
+        exit 1 ;;
+    esac
+  done
+}
+
+# --- Snapshot ---
+capture_snapshot() {
+  PS_SNAPSHOT=$(ps -eo pid,ppid,pgid,pcpu,pmem,state,etime,comm 2>/dev/null)
+
+  # A diagnostic that can't read process/system stats must NOT fall through to a
+  # "HEALTHY" report — that false reassurance is worse than no report. ps returns
+  # empty and sysctl fails when blocked (e.g. inside a command sandbox), which
+  # silently poisons every CPU/memory/process/Claude check and the report card.
+  # Detect that here (before the header even prints) and abort loudly instead.
+  [[ -z "$PS_SNAPSHOT" ]] && HAVE_PS=0
+  sysctl -n hw.ncpu >/dev/null 2>&1 || HAVE_SYSCTL=0
+
+  if (( HAVE_PS == 0 || HAVE_SYSCTL == 0 )); then
+    local missing=""
+    (( HAVE_PS == 0 ))     && missing="ps"
+    (( HAVE_SYSCTL == 0 )) && missing="${missing:+$missing / }sysctl"
+    echo -e "${YELLOW}${BOLD}================================================================${NC}" >&2
+    echo -e "${YELLOW}${BOLD} SYSCHK — DEGRADED: ${missing} unavailable (sandboxed environment)${NC}" >&2
+    echo -e "${YELLOW} Sections needing them report NOT MEASURED, never HEALTHY.${NC}" >&2
+    echo -e "${DIM}     Full report: run  syschk  in a terminal${NC}" >&2
+    echo -e "${YELLOW}${BOLD}================================================================${NC}" >&2
+  fi
+}
+
+# --- Header ---
+print_header() {
+  local hostname=$(scutil --get ComputerName 2>/dev/null || hostname -s)
+  local macos_ver=$(sw_vers -productVersion 2>/dev/null || echo "unknown")
+  local chip=$(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo "unknown")
+  local up=$(uptime | sed 's/.*up /up /' | sed 's/,.*//')
+
+  # NCPU/TOTAL_MEM_GB fall back to 8/0 when sysctl is blocked. Printing those
+  # states a wrong core count and "0 GB RAM" as fact — say unknown instead.
+  local specs
+  if (( HAVE_SYSCTL )); then
+    specs="$NCPU cores | ${TOTAL_MEM_GB} GB RAM"
+  else
+    specs="cores/RAM unknown (sysctl blocked)"
+  fi
+
+  echo -e "${BOLD}================================================================${NC}"
+  echo -e "${BOLD} SYSCHK — macOS System Diagnostics${NC}"
+  echo -e " ${DIM}$hostname | macOS $macos_ver | $specs${NC}"
+  echo -e " ${DIM}$chip${NC}"
+  echo -e " ${DIM}$(date '+%Y-%m-%d %H:%M:%S') | $up${NC}"
+  echo -e "${BOLD}================================================================${NC}"
+}
+
+# === SECTION 1: CPU ANALYSIS ===
+check_cpu() {
+  header "CPU ANALYSIS"
+
+  local max_capacity=$(( NCPU * 100 ))
+  local found_issues=false
+
+  # System total from full snapshot (not just top 10)
+  local total_cpu
+  total_cpu=$(echo "$PS_SNAPSHOT" | tail -n +2 | awk '{sum+=int($4)} END {print sum+0}')
+
+  # Top 10 by CPU for display
+  local top_procs
+  top_procs=$(echo "$PS_SNAPSHOT" | tail -n +2 | sort -k4 -rn | head -10)
+
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    local pid ppid pgid cpu mem state etime comm
+    read -r pid ppid pgid cpu mem state etime comm <<< "$line"
+
+    local cpu_int=${cpu%.*}
+    [[ -z "$cpu_int" ]] && cpu_int=0
+
+    local parent_comm
+    parent_comm=$(ps -p "$ppid" -o comm= 2>/dev/null || echo "dead")
+
+    if (( cpu_int >= 200 )); then
+      crit "PID %-7s %-20s CPU: %6s%%  MEM: %5s%%  Parent: %s (%s)" "$pid" "$comm" "$cpu" "$mem" "$parent_comm" "$ppid"
+      grade_section "CPU" "crit"
+      add_fix "kill $pid" "$comm at ${cpu}% CPU" risky
+      found_issues=true
+    elif (( cpu_int >= 50 )); then
+      warn "PID %-7s %-20s CPU: %6s%%  MEM: %5s%%  Parent: %s (%s)" "$pid" "$comm" "$cpu" "$mem" "$parent_comm" "$ppid"
+      grade_section "CPU" "warn"
+      found_issues=true
+    elif $VERBOSE; then
+      info "PID %-7s %-20s CPU: %6s%%  MEM: %5s%%" "$pid" "$comm" "$cpu" "$mem"
+    fi
+  done <<< "$top_procs"
+
+  # System utilization
+  local utilization_pct=$(( total_cpu * 100 / max_capacity ))
+  if (( utilization_pct >= 90 )); then
+    crit "System total: ${total_cpu}% of ${max_capacity}% capacity (${utilization_pct}% utilized)"
+    grade_section "CPU" "crit"
+  elif (( utilization_pct >= 70 )); then
+    warn "System total: ${total_cpu}% of ${max_capacity}% capacity (${utilization_pct}% utilized)"
+    grade_section "CPU" "warn"
+  else
+    ok "System total: ${total_cpu}% of ${max_capacity}% capacity (${utilization_pct}% utilized)"
+  fi
+
+  if ! $found_issues; then
+    ok "No high-CPU processes detected"
+  fi
+}
+
+# === SECTION 2: ORPHAN/GHOST PROCESSES ===
+check_orphans() {
+  header "ORPHAN/GHOST PROCESSES"
+
+  local found=false
+  # Known system process path prefixes to ignore
+  local system_paths="/usr/libexec/|/usr/sbin/|/System/Library/|/Library/Apple/|/usr/bin/|/sbin/|/Library/PrivilegedHelperTools/|/Library/PrivateFrameworks/"
+
+  # Get processes with PPID=1
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    local pid ppid pgid cpu mem state etime comm
+    read -r pid ppid pgid cpu mem state etime comm <<< "$line"
+    [[ "$ppid" != "1" ]] && continue
+    [[ "$pid" == "1" ]] && continue
+
+    # Get full args for better filtering
+    local full_args
+    full_args=$(ps -p "$pid" -o args= 2>/dev/null || echo "")
+
+    # Skip known system processes
+    if echo "$full_args" | grep -qE "$system_paths"; then continue; fi
+    # Skip regular launched apps
+    if echo "$full_args" | grep -q ".app/Contents/MacOS/"; then continue; fi
+    # Skip launchd itself and kernel_task
+    if [[ "$comm" == "launchd" ]] || [[ "$comm" == "kernel_task" ]]; then continue; fi
+
+    # A dev worker sitting in a LIVE Claude session's process group is NOT an
+    # orphan, whatever its PPID — the session owns it, and PPID=1 is a normal
+    # shape for one. Only check_claude_ecosystem knew this; without the same
+    # test here the two detectors disagreed in the same report, and this one
+    # raised `kill <pid>` classed `safe`, which --fix auto-runs.
+    # Observed 27-Aug-2026: bun PID 50530 (10.3% MEM) reported "orphaned" here
+    # while the ecosystem section listed it as "Session (PGID 50512): claude
+    # + 1 bun" two sections later.
+    if echo "$PS_SNAPSHOT" | awk -v g="$pgid" -v re="$CLAUDE_COMM_RE" \
+         '$3 == g && $8 ~ re' | grep -q .; then
+      continue
+    fi
+
+    local cpu_int=${cpu%.*}
+    [[ -z "$cpu_int" ]] && cpu_int=0
+
+    # Dev tool orphans are always critical
+    if echo "$comm" | grep -qiE "^(bun|node|rg|deno|esbuild|npx|tsx)$"; then
+      crit "Orphaned dev worker: PID %-7s %-15s CPU: %s%%  MEM: %s%%  Runtime: %s" "$pid" "$comm" "$cpu" "$mem" "$etime"
+      crit "  Likely leftover from crashed parent. Kill with: kill $pid"
+      grade_section "Processes" "crit"
+      add_fix "kill $pid" "orphaned $comm worker" safe
+      found=true
+    elif (( cpu_int > 10 )); then
+      warn "Orphaned process using CPU: PID %-7s %-15s CPU: %s%%  Runtime: %s" "$pid" "$comm" "$cpu" "$etime"
+      grade_section "Processes" "warn"
+      found=true
+    elif $VERBOSE; then
+      info "Orphaned (low impact): PID %-7s %-15s CPU: %s%%  Runtime: %s" "$pid" "$comm" "$cpu" "$etime"
+      found=true
+    fi
+  done <<< "$(echo "$PS_SNAPSHOT" | tail -n +2)"
+
+  if ! $found; then
+    ok "No suspicious orphaned processes detected"
+  fi
+}
+
+# === SECTION 3: ZOMBIE PROCESSES ===
+check_zombies() {
+  header "ZOMBIE PROCESSES"
+
+  local zombie_count=0
+  local found=false
+
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    local pid ppid pgid cpu mem state etime comm
+    read -r pid ppid pgid cpu mem state etime comm <<< "$line"
+    [[ "$state" != *Z* ]] && continue
+
+    ((zombie_count++))
+    found=true
+    local parent_comm
+    parent_comm=$(ps -p "$ppid" -o comm= 2>/dev/null || echo "dead")
+    warn "Zombie PID %-7s %-20s Parent: %s (%s)" "$pid" "$comm" "$parent_comm" "$ppid"
+  done <<< "$(echo "$PS_SNAPSHOT" | tail -n +2)"
+
+  if (( zombie_count > 5 )); then
+    crit "$zombie_count zombie processes — parent processes may need to be killed"
+    grade_section "Processes" "crit"
+  elif (( zombie_count > 0 )); then
+    warn "$zombie_count zombie process(es) detected"
+    grade_section "Processes" "warn"
+  else
+    ok "No zombie processes"
+  fi
+}
+
+# === SECTION 4: MEMORY ===
+check_memory() {
+  header "MEMORY"
+
+  # Parse vm_stat
+  local vmstat_output
+  vmstat_output=$(vm_stat 2>/dev/null)
+
+  local page_size
+  page_size=$(echo "$vmstat_output" | head -1 | grep -oE '[0-9]+' | tail -1)
+  [[ -z "$page_size" ]] && page_size=16384
+
+  # Extract page counts
+  local free_pages active_pages inactive_pages wired_pages compressed_pages purgeable_pages speculative_pages
+  free_pages=$(echo "$vmstat_output" | awk '/Pages free:/ {gsub(/\./,"",$NF); print $NF}')
+  active_pages=$(echo "$vmstat_output" | awk '/Pages active:/ {gsub(/\./,"",$NF); print $NF}')
+  inactive_pages=$(echo "$vmstat_output" | awk '/Pages inactive:/ {gsub(/\./,"",$NF); print $NF}')
+  wired_pages=$(echo "$vmstat_output" | awk '/Pages wired down:/ {gsub(/\./,"",$NF); print $NF}')
+  compressed_pages=$(echo "$vmstat_output" | awk '/Pages occupied by compressor:/ {gsub(/\./,"",$NF); print $NF}')
+  purgeable_pages=$(echo "$vmstat_output" | awk '/Pages purgeable:/ {gsub(/\./,"",$NF); print $NF}')
+  speculative_pages=$(echo "$vmstat_output" | awk '/Pages speculative:/ {gsub(/\./,"",$NF); print $NF}')
+
+  # Defaults
+  : "${free_pages:=0}" "${active_pages:=0}" "${inactive_pages:=0}"
+  : "${wired_pages:=0}" "${compressed_pages:=0}" "${purgeable_pages:=0}" "${speculative_pages:=0}"
+
+  # Calculate bytes -> GB
+  local active_gb=$(( active_pages * page_size / 1073741824 ))
+  local wired_gb=$(( wired_pages * page_size / 1073741824 ))
+  local compressed_gb=$(( compressed_pages * page_size / 1073741824 ))
+  local available_pages=$(( free_pages + inactive_pages + purgeable_pages + speculative_pages ))
+  local available_gb=$(( available_pages * page_size / 1073741824 ))
+
+  # Memory pressure percentage
+  local pressure_pct=0
+  if (( TOTAL_MEM_BYTES > 0 )); then
+    local available_bytes=$(( available_pages * page_size ))
+    pressure_pct=$(( 100 - (available_bytes * 100 / TOTAL_MEM_BYTES) ))
+  fi
+
+  info "Physical: ${TOTAL_MEM_GB} GB | Active: ${active_gb} GB | Wired: ${wired_gb} GB | Compressed: ${compressed_gb} GB"
+
+  # Memory free percentage
+  local free_pct=$(( 100 - pressure_pct ))
+  if (( free_pct < 15 )); then
+    crit "Available: ${free_pct}% (${available_gb} GB free) — heavy memory pressure"
+    grade_section "Memory" "crit"
+    add_fix "Close heavy apps" "memory pressure at ${free_pct}% free" manual
+  elif (( free_pct < 30 )); then
+    warn "Available: ${free_pct}% (${available_gb} GB free) — moderate memory pressure"
+    grade_section "Memory" "warn"
+  else
+    ok "Available: ${free_pct}% (${available_gb} GB free)"
+  fi
+
+  # Compressed memory check
+  if (( TOTAL_MEM_BYTES > 0 )); then
+    local compressed_bytes=$(( compressed_pages * page_size ))
+    local compressed_pct=$(( compressed_bytes * 100 / TOTAL_MEM_BYTES ))
+    if (( compressed_pct > 75 )); then
+      crit "Compressed memory: ${compressed_gb} GB (${compressed_pct}% of physical) — extreme compression"
+      grade_section "Memory" "crit"
+    elif (( compressed_pct > 50 )); then
+      warn "Compressed memory: ${compressed_gb} GB (${compressed_pct}% of physical) — heavy compression"
+      grade_section "Memory" "warn"
+    fi
+  fi
+
+  # Swap usage
+  local swap_info
+  swap_info=$(sysctl vm.swapusage 2>/dev/null)
+  if [[ -n "$swap_info" ]]; then
+    local swap_used
+    swap_used=$(echo "$swap_info" | grep -oE 'used = [0-9.]+[BKMG]+' | grep -oE '[0-9.]+[BKMG]+')
+    local swap_mb=0
+
+    if [[ -n "$swap_used" ]]; then
+      local swap_num=${swap_used%[BKMG]*}
+      local swap_unit=${swap_used//[0-9.]/}
+      case "$swap_unit" in
+        G|GB) swap_mb=$(echo "$swap_num" | awk '{printf "%d", $1 * 1024}') ;;
+        M|MB) swap_mb=${swap_num%.*} ;;
+        K|KB) swap_mb=0 ;;
+        B|"") swap_mb=0 ;;
+      esac
+      [[ -z "$swap_mb" ]] && swap_mb=0
+    fi
+
+    if (( swap_mb > 2048 )); then
+      crit "Swap: ${swap_used} used — excessive swapping"
+      grade_section "Memory" "crit"
+    elif (( swap_mb > 0 )); then
+      warn "Swap: ${swap_used} used"
+      grade_section "Memory" "warn"
+    else
+      ok "Swap: none"
+    fi
+  fi
+
+  # Top memory consumers (verbose)
+  if $VERBOSE; then
+    echo ""
+    info "Top 5 memory consumers:"
+    echo "$PS_SNAPSHOT" | tail -n +2 | sort -k5 -rn | head -5 | while IFS= read -r line; do
+      local pid ppid pgid cpu mem state etime comm
+      read -r pid ppid pgid cpu mem state etime comm <<< "$line"
+      info "  PID %-7s %-20s MEM: %5s%%  CPU: %5s%%" "$pid" "$comm" "$mem" "$cpu"
+    done
+  fi
+}
+
+# === SECTION 5: THERMAL STATE ===
+check_thermal() {
+  header "THERMAL STATE"
+
+  # pmset thermal check
+  local therm_output
+  therm_output=$(pmset -g therm 2>/dev/null)
+
+  if [[ -z "$therm_output" ]]; then
+    info "pmset thermal data unavailable"
+  elif echo "$therm_output" | grep -q "No thermal warning"; then
+    ok "No thermal warnings recorded"
+  else
+    # Check for CPU speed limit
+    local speed_limit
+    speed_limit=$(echo "$therm_output" | grep -oE 'CPU_Speed_Limit\s*=\s*[0-9]+' | grep -oE '[0-9]+')
+    if [[ -n "$speed_limit" ]] && (( speed_limit < 100 )); then
+      crit "CPU throttled to ${speed_limit}% — thermal throttling active"
+      grade_section "Thermal" "crit"
+      add_fix "Reduce CPU load" "CPU throttled to ${speed_limit}%" manual
+    else
+      warn "Thermal warning recorded (see: pmset -g therm)"
+      grade_section "Thermal" "warn"
+    fi
+  fi
+
+  # Sleep prevention check — filter out known-legit holders before warning.
+  #
+  # macOS has many processes that legitimately prevent idle sleep as part of
+  # normal operation (Handoff, Bluetooth, audio playback, user activity).
+  # A raw count is too noisy — we only care about UNEXPECTED holders.
+  #
+  # Known-legit process names (pattern = word-boundary match against `pid N(name):`):
+  #   Apple system daemons: sharingd, powerd, bluetoothd, coreaudiod,
+  #     useractivityd, WindowServer, mds, mdworker, backupd, locationd,
+  #     timed, cloudd, rapportd, identityservicesd
+  #   User tools that are inherently sleep-preventers by design: caffeinate
+  local assertions preventer_lines total_preventers unexpected_preventers
+  assertions=$(pmset -g assertions 2>/dev/null)
+
+  # Extract only the pid lines (not the header summary lines)
+  preventer_lines=$(echo "$assertions" \
+    | grep -E '^\s*pid [0-9]+\(' \
+    | grep -E 'PreventUserIdleSystemSleep|PreventSystemSleep' \
+    || true)
+  total_preventers=$(printf '%s' "$preventer_lines" | grep -c '^' 2>/dev/null || echo "0")
+  [ -z "$preventer_lines" ] && total_preventers=0
+
+  # Filter out known-legit holders
+  unexpected_preventers=$(printf '%s' "$preventer_lines" \
+    | grep -vE '\((sharingd|powerd|bluetoothd|coreaudiod|useractivityd|WindowServer|mds|mdworker|backupd|locationd|timed|cloudd|rapportd|identityservicesd|caffeinate)\)' \
+    || true)
+  local unexpected_count
+  unexpected_count=$(printf '%s' "$unexpected_preventers" | grep -c '^' 2>/dev/null || echo "0")
+  [ -z "$unexpected_preventers" ] && unexpected_count=0
+
+  if (( unexpected_count > 0 )); then
+    warn "${unexpected_count} unexpected sleep-preventer(s) (out of ${total_preventers} total)"
+    grade_section "Thermal" "warn"
+    printf '%s\n' "$unexpected_preventers" | head -5 | while IFS= read -r line; do
+      info "  $line"
+    done
+  elif (( total_preventers > 0 )) && $VERBOSE; then
+    info "${total_preventers} sleep-preventer(s), all known-legit (system daemons + caffeinate)"
+  fi
+
+  # Try powermetrics (needs sudo) — capture once, reuse
+  local pm_output
+  pm_output=$(sudo -n powermetrics --samplers smc -n 1 --sample-rate 1000 2>/dev/null || true)
+  if echo "$pm_output" | grep -qi "temperature\|die temp"; then
+    local die_temp
+    die_temp=$(echo "$pm_output" | grep -i "die temp" | grep -oE '[0-9.]+' | head -1)
+    if [[ -n "$die_temp" ]]; then
+      local temp_int=${die_temp%.*}
+      if (( temp_int > 95 )); then
+        crit "CPU die temperature: ${die_temp}°C — dangerously hot"
+        grade_section "Thermal" "crit"
+      elif (( temp_int > 80 )); then
+        warn "CPU die temperature: ${die_temp}°C — running hot"
+        grade_section "Thermal" "warn"
+      else
+        ok "CPU die temperature: ${die_temp}°C"
+      fi
+    fi
+  else
+    info "Skipped powermetrics thermal sampling (requires sudo)"
+  fi
+}
+
+# === SECTION 6: DISK USAGE ===
+check_disk() {
+  header "DISK USAGE"
+
+  # Root volume — macOS APFS df format: Filesystem Size Used Avail Capacity ...
+  local pct used avail
+  pct=$(df -h / 2>/dev/null | tail -1 | awk '{gsub(/%/,"",$5); print $5}')
+  used=$(df -h / 2>/dev/null | tail -1 | awk '{print $3}')
+  avail=$(df -h / 2>/dev/null | tail -1 | awk '{print $4}')
+
+  if (( pct >= 95 )); then
+    crit "Root volume: %s%% used (%s available)" "$pct" "$avail"
+    grade_section "Disk" "crit"
+    add_fix "du -sh ~/*/ | sort -hr | head -10" "disk at ${pct}% — find large dirs" manual
+  elif (( pct >= 85 )); then
+    warn "Root volume: %s%% used (%s available)" "$pct" "$avail"
+    grade_section "Disk" "warn"
+  else
+    ok "Root volume: %s%% used (%s available)" "$pct" "$avail"
+  fi
+
+  # /tmp check
+  local tmp_output
+  tmp_output=$(df -h /private/tmp 2>/dev/null | tail -1)
+  if [[ -n "$tmp_output" ]]; then
+    local tmp_pct
+    tmp_pct=$(echo "$tmp_output" | awk '{print $5}' | tr -d '%')
+    if (( tmp_pct >= 90 )); then
+      warn "/tmp volume: ${tmp_pct}% used"
+    fi
+  fi
+
+  # Large directories (if warning or verbose)
+  if (( pct >= 85 )) || $VERBOSE; then
+    info "Largest directories in \$HOME:"
+    du -sh ~/*/  2>/dev/null | sort -hr | head -5 | while IFS= read -r line; do
+      info "  $line"
+    done
+  fi
+}
+
+# === SECTION 7: LAUNCH AGENTS/DAEMONS ===
+check_launch_agents() {
+  header "LAUNCH AGENTS & DAEMONS"
+
+  local user_agents=0 system_daemons=0 unknown_count=0
+  local known_vendors="com.apple.|com.google.|com.microsoft.|com.docker.|com.adobe.|com.spotify.|com.1password.|com.raycast.|org.mozilla.|io.tailscale.|com.shrix."
+
+  # User LaunchAgents
+  if [[ -d "$HOME/Library/LaunchAgents" ]]; then
+    for plist in "$HOME/Library/LaunchAgents/"*.plist; do
+      [[ ! -f "$plist" ]] && continue
+      ((user_agents++))
+      local basename=$(basename "$plist")
+      if ! echo "$basename" | grep -qE "$known_vendors"; then
+        ((unknown_count++))
+        local mod_date
+        mod_date=$(stat -f "%Sm" -t "%Y-%m-%d" "$plist" 2>/dev/null)
+        local days_old
+        days_old=$(( ( $(date +%s) - $(stat -f "%m" "$plist" 2>/dev/null || echo 0) ) / 86400 ))
+        if (( days_old <= 7 )); then
+          warn "Unknown agent: $basename (modified ${days_old}d ago — recently added)"
+          grade_section "Agents" "warn"
+        elif $VERBOSE; then
+          info "Unknown agent: $basename (modified $mod_date)"
+        fi
+      fi
+    done
+  fi
+
+  # System LaunchDaemons (non-Apple)
+  if [[ -d "/Library/LaunchDaemons" ]]; then
+    for plist in /Library/LaunchDaemons/*.plist; do
+      [[ ! -f "$plist" ]] && continue
+      local basename=$(basename "$plist")
+      if ! echo "$basename" | grep -q "^com.apple."; then
+        ((system_daemons++))
+      fi
+    done
+  fi
+
+  info "$user_agents user LaunchAgents, $system_daemons third-party system LaunchDaemons"
+
+  if (( unknown_count == 0 )); then
+    ok "No unknown launch agents detected"
+  elif ! $VERBOSE; then
+    info "$unknown_count unknown agent(s) — run with -v for details"
+  fi
+}
+
+# === SECTION 8: NETWORK ===
+check_network() {
+  header "NETWORK"
+
+  local lsof_output
+  lsof_output=$(lsof -i -P -n 2>/dev/null | grep -v "^COMMAND")
+
+  if [[ -z "$lsof_output" ]]; then
+    info "No network connections (or lsof unavailable)"
+    return
+  fi
+
+  local listen_count established_count
+  listen_count=$(echo "$lsof_output" | grep -c "LISTEN" 2>/dev/null || echo 0)
+  established_count=$(echo "$lsof_output" | grep -c "ESTABLISHED" 2>/dev/null || echo 0)
+
+  ok "$listen_count listening ports, $established_count established connections"
+
+  # Check for processes with many connections.
+  #
+  # The ceiling is per CLASS, not flat. A pooled HTTP/2 API client legitimately
+  # holds a hundred-plus long-lived connections, so the old flat 50 fired on
+  # every single run — a warning that is always on carries no signal, and this
+  # one sat next to seven HEALTHY rows telling the reader something was wrong
+  # when nothing was.
+  #
+  # MEASURED 26-Aug-2026, 9 samples on this machine with a Claude Code session
+  # active. `claude` established connections:
+  #     135 135 135 135 135 135 142 193 195     median 135, max 195
+  # Everything else over the same window stayed tiny: Claude 12, 2.1.243 12,
+  # Browser (Arc) 7 — so 50 remains right for them.
+  # 300 clears the observed peak with headroom and still catches a genuine
+  # runaway; 200 would have fired on the two 19x samples, 50 fires always.
+  # Re-measure before moving this: the samples above are the evidence.
+  # Only the CLI/session binaries get the raised ceiling. The Desktop app
+  # (`Claude`) measured 12 and keeps 50 — handing it 300 would weaken the check
+  # for a process that has never come close.
+  net_ceiling() {
+    [[ "$1" =~ $CLAUDE_COMM_RE ]] && { echo 300; return; }
+    echo 50
+  }
+
+  local heavy_net
+  heavy_net=$(echo "$lsof_output" | grep "ESTABLISHED" | awk '{print $1}' | sort | uniq -c | sort -rn | head -5)
+
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    local count name ceiling
+    read -r count name <<< "$line"
+    ceiling=$(net_ceiling "$name")
+    if (( count > ceiling )); then
+      warn "$name has $count established connections (ceiling $ceiling)"
+      grade_section "Network" "warn"
+    elif $VERBOSE; then
+      info "$name: $count connections (ceiling $ceiling)"
+    fi
+  done <<< "$heavy_net"
+
+  # Check for non-system processes listening on privileged ports
+  local priv_listeners
+  priv_listeners=$(echo "$lsof_output" | grep "LISTEN" | awk -F: '{print $NF}' | awk '{print $1}' | sort -n | while read -r port; do
+    if [[ -n "$port" ]] && (( port < 1024 )); then echo "$port"; fi
+  done)
+
+  if [[ -n "$priv_listeners" ]] && $VERBOSE; then
+    info "Privileged port listeners (<1024): $(echo "$priv_listeners" | tr '\n' ' ')"
+  fi
+
+  # Verbose: show full breakdown
+  if $VERBOSE; then
+    echo ""
+    info "Top network processes:"
+    echo "$lsof_output" | awk '{print $1}' | sort | uniq -c | sort -rn | head -10 | while IFS= read -r line; do
+      info "  $line"
+    done
+  fi
+}
+
+# === SECTION 9: CLAUDE CODE ECOSYSTEM (THE KEY CHECK) ===
+check_claude_ecosystem() {
+  header "CLAUDE CODE ECOSYSTEM"
+
+  # Collect all dev ecosystem processes
+  local dev_procs
+  dev_procs=$(echo "$PS_SNAPSHOT" | tail -n +2 | awk -v re="$DEV_COMM_RE" '$8 ~ re')
+
+  if [[ -z "$dev_procs" ]]; then
+    ok "No Claude Code or dev tool processes running"
+    return
+  fi
+
+  # --- Group by PGID ---
+  local pgids
+  pgids=$(echo "$dev_procs" | awk '{print $3}' | sort -u)
+
+  local session_count=0
+  local ghost_groups=0
+  local orphan_workers=0
+
+  for pgid in $pgids; do
+    local group_procs
+    group_procs=$(echo "$dev_procs" | awk -v g="$pgid" '$3 == g')
+    local group_count
+    group_count=$(echo "$group_procs" | wc -l | tr -d ' ')
+
+    # Find root process (PID == PGID)
+    local root_alive=false
+    local root_comm=""
+    if ps -p "$pgid" -o comm= >/dev/null 2>&1; then
+      root_alive=true
+      root_comm=$(ps -p "$pgid" -o comm= 2>/dev/null)
+    fi
+
+    # Check if any claude process exists in this group
+    local has_claude=false
+    if echo "$group_procs" | awk '{print $8}' | grep -qE "$CLAUDE_COMM_RE"; then
+      has_claude=true
+    fi
+
+    if $has_claude || $root_alive; then
+      ((session_count++))
+      # Active session — gather details
+      local claude_pids bun_count node_count rg_count
+      bun_count=$(echo "$group_procs" | awk '$8 == "bun"' | wc -l | tr -d ' ')
+      node_count=$(echo "$group_procs" | awk '$8 == "node"' | wc -l | tr -d ' ')
+      rg_count=$(echo "$group_procs" | awk '$8 == "rg"' | wc -l | tr -d ' ')
+
+      local group_cpu
+      group_cpu=$(echo "$group_procs" | awk '{sum+=$4} END {printf "%.1f", sum}')
+
+      local detail="claude"
+      (( bun_count > 0 )) && detail="$detail + ${bun_count} bun"
+      (( node_count > 0 )) && detail="$detail + ${node_count} node"
+      (( rg_count > 0 )) && detail="$detail + ${rg_count} rg"
+
+      info "Session (PGID $pgid): $detail | Total CPU: ${group_cpu}%"
+
+      if $VERBOSE; then
+        echo "$group_procs" | while IFS= read -r line; do
+          local pid ppid pgid2 cpu mem state etime comm
+          read -r pid ppid pgid2 cpu mem state etime comm <<< "$line"
+          info "    PID %-7s %-12s CPU: %5s%%  Runtime: %s" "$pid" "$comm" "$cpu" "$etime"
+        done
+      fi
+    else
+      # Ghost group — root is dead but workers remain
+      ((ghost_groups++))
+      local group_cpu
+      group_cpu=$(echo "$group_procs" | awk '{sum+=$4} END {printf "%.1f", sum}')
+      crit "Ghost process group (PGID $pgid): $group_count workers, total CPU: ${group_cpu}%"
+      crit "  Root process (PID $pgid) is dead — workers are orphaned"
+      crit "  Kill with: kill -- -$pgid"
+      grade_section "Claude" "crit"
+      add_fix "kill -- -$pgid" "ghost group (PGID $pgid, ${group_count} workers)" safe
+
+      if $VERBOSE; then
+        echo "$group_procs" | while IFS= read -r line; do
+          local pid ppid pgid2 cpu mem state etime comm
+          read -r pid ppid pgid2 cpu mem state etime comm <<< "$line"
+          info "    PID %-7s %-12s CPU: %5s%%  Runtime: %s" "$pid" "$comm" "$cpu" "$etime"
+        done
+      fi
+    fi
+  done
+
+  # --- Check individual orphaned workers (PPID=1, not in a live group) ---
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    local pid ppid pgid cpu mem state etime comm
+    read -r pid ppid pgid cpu mem state etime comm <<< "$line"
+    [[ "$ppid" != "1" ]] && continue
+
+    # Check if this worker's PGID has a live claude session
+    local pgid_has_claude=false
+    if echo "$dev_procs" | awk -v g="$pgid" -v re="$CLAUDE_COMM_RE" '$3 == g && $8 ~ re' | grep -q .; then
+      pgid_has_claude=true
+    fi
+
+    if ! $pgid_has_claude && ! [[ "$comm" =~ $CLAUDE_COMM_RE ]]; then
+      ((orphan_workers++))
+      crit "Orphaned worker: PID $pid ($comm) — PPID=1, no parent claude session"
+      crit "  Kill with: kill $pid"
+      grade_section "Claude" "crit"
+      add_fix "kill $pid" "orphaned $comm (no parent session)" safe
+    fi
+  done <<< "$dev_procs"
+
+  # --- Check for runaway rg processes ---
+  local rg_procs
+  rg_procs=$(echo "$dev_procs" | awk '$8 == "rg"')
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    local pid ppid pgid cpu mem state etime comm
+    read -r pid ppid pgid cpu mem state etime comm <<< "$line"
+    local cpu_int=${cpu%.*}
+    [[ -z "$cpu_int" ]] && cpu_int=0
+    local elapsed_secs
+    elapsed_secs=$(parse_elapsed "$etime")
+
+    if (( elapsed_secs > 60 && cpu_int > 50 )); then
+      crit "Stuck ripgrep: PID $pid  CPU: ${cpu}%  Runtime: ${etime} — ripgrep should finish in seconds"
+      crit "  Kill with: kill $pid"
+      grade_section "Claude" "crit"
+      add_fix "kill $pid" "stuck rg (${cpu}% CPU, ${etime})" safe
+    elif (( elapsed_secs > 60 )); then
+      warn "Long-running ripgrep: PID $pid  Runtime: ${etime} (CPU: ${cpu}%)"
+      grade_section "Claude" "warn"
+    fi
+  done <<< "$rg_procs"
+
+  # --- Check TCC/Trust daemon cascade ---
+  local tccd_cpu trustd_cpu
+  tccd_cpu=$(echo "$PS_SNAPSHOT" | awk '$8 == "tccd" {sum+=$4} END {printf "%.0f", sum+0}')
+  trustd_cpu=$(echo "$PS_SNAPSHOT" | awk '$8 == "trustd" {sum+=$4} END {printf "%.0f", sum+0}')
+
+  if (( tccd_cpu >= 50 || trustd_cpu >= 50 )); then
+    crit "TCC/Trust daemons under heavy load (tccd: ${tccd_cpu}%, trustd: ${trustd_cpu}%) — cascading from dev tool permission checks"
+    grade_section "Claude" "crit"
+  elif (( tccd_cpu >= 20 || trustd_cpu >= 20 )); then
+    warn "TCC/Trust daemons elevated (tccd: ${tccd_cpu}%, trustd: ${trustd_cpu}%) — possible cascade from file scanning"
+    grade_section "Claude" "warn"
+  fi
+
+  # Summary for this section
+  echo ""
+  if (( ghost_groups > 0 || orphan_workers > 0 )); then
+    crit "Found $ghost_groups ghost group(s), $orphan_workers orphaned worker(s)"
+  else
+    ok "$session_count active Claude session(s), no ghost processes"
+  fi
+}
+
+# === REPORT CARD ===
+_grade_badge() {
+  case "$1" in
+    crit) echo -e "${RED}${BOLD} ❌ CRITICAL ${NC}" ;;
+    warn) echo -e "${YELLOW}${BOLD} ⚠️  WARNING  ${NC}" ;;
+    # Same shape as WARNING (2-codepoint emoji + 7 letters + 2 spaces) so the
+    # card's right border stays put. The section body and the overall verdict
+    # both spell out "not measured"; the badge only has to be unmistakable.
+    skip) echo -e "${DIM} ⏭️  SKIPPED  ${NC}" ;;
+    *)    echo -e "${GREEN}${BOLD} ✅ HEALTHY  ${NC}" ;;
+  esac
+}
+
+_card_row() {
+  local label="$1" grade="$2"
+  local badge
+  badge=$(_grade_badge "$grade")
+  printf "${BOLD}│${NC} %-18s ${BOLD}│${NC} %b ${BOLD}│${NC}\n" "$label" "$badge"
+}
+
+apply_fixes() {
+  header "OPTIMIZE"
+
+  if (( HAVE_PS == 0 )); then
+    echo -e "  ${DIM}[SKIP] --fix needs ps to identify targets — run in a terminal${NC}"
+    return
+  fi
+
+  # An interactive tty is REQUIRED, not merely preferred. Without it there is
+  # no one to answer the prompt, and a --fix invoked from a script or an agent's
+  # Bash tool would kill processes with nobody having agreed to it.
+  if [[ ! -t 0 ]]; then
+    echo -e "  ${YELLOW}[HOLD]${NC} --fix needs an interactive terminal (stdin is not a tty)"
+    echo -e "  ${DIM}Nothing was changed. Run 'syschk --fix' yourself to confirm.${NC}"
+    return
+  fi
+
+  # The ghost detector legitimately reports LIVE claude sessions too. Killing
+  # our own process group would take down the very shell running the fix, so
+  # self-targeting commands are dropped before the plan is even shown.
+  local self_pgid
+  self_pgid=$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')
+
+  local safe_idx=() risky_idx=() manual_idx=()
+  local i
+  for (( i=0; i<FIX_COUNT; i++ )); do
+    case "${FIX_CLASS[$i]}" in
+      safe)
+        if [[ -n "$self_pgid" && "${FIX_CMD[$i]}" == *"-${self_pgid}"* ]]; then
+          echo -e "  ${YELLOW}[HOLD]${NC} refusing self-targeting fix: ${FIX_CMD[$i]}"
+        else
+          safe_idx+=("$i")
+        fi ;;
+      risky) risky_idx+=("$i") ;;
+      *)     manual_idx+=("$i") ;;
+    esac
+  done
+
+  if (( ${#safe_idx[@]} == 0 )); then
+    ok "Nothing safely auto-fixable"
+  else
+    echo -e "  ${BOLD}Will run — targets whose parent is already dead:${NC}"
+    for i in "${safe_idx[@]}"; do
+      printf "    %-22s ${DIM}← %s${NC}\n" "${FIX_CMD[$i]}" "${FIX_WHY[$i]}"
+    done
+    echo ""
+    printf "  Proceed? [y/N] "
+    local reply=""
+    read -r reply
+    if [[ "$reply" == [Yy]* ]]; then
+      for i in "${safe_idx[@]}"; do
+        if eval "${FIX_CMD[$i]}" 2>/dev/null; then
+          echo -e "    ${GREEN}✓${NC} ${FIX_CMD[$i]}"
+        else
+          echo -e "    ${YELLOW}✗${NC} ${FIX_CMD[$i]} ${DIM}(already gone, or refused)${NC}"
+        fi
+      done
+      echo -e "  ${DIM}Re-run syschk to confirm the result.${NC}"
+    else
+      echo -e "  ${DIM}Declined — nothing was changed.${NC}"
+    fi
+  fi
+
+  # risky and manual are PRINTED, never executed. A CPU threshold cannot tell a
+  # runaway from a build, so that call stays with the human.
+  if (( ${#risky_idx[@]} > 0 )); then
+    echo ""
+    echo -e "  ${YELLOW}${BOLD}Your call — live processes, matched only on CPU:${NC}"
+    for i in "${risky_idx[@]}"; do
+      printf "    %-22s ${DIM}← %s${NC}\n" "${FIX_CMD[$i]}" "${FIX_WHY[$i]}"
+    done
+    echo -e "  ${DIM}Check what each one is before killing it — a build or encode looks identical here.${NC}"
+  fi
+
+  if (( ${#manual_idx[@]} > 0 )); then
+    echo ""
+    echo -e "  ${CYAN}${BOLD}Needs you — not a runnable fix:${NC}"
+    for i in "${manual_idx[@]}"; do
+      printf "    %-34s ${DIM}← %s${NC}\n" "${FIX_CMD[$i]}" "${FIX_WHY[$i]}"
+    done
+  fi
+}
+
+print_report_card() {
+  echo ""
+  echo -e "${BOLD}╭───────────────────────────────────────────╮${NC}"
+  echo -e "${BOLD}│           SYSTEM REPORT CARD               │${NC}"
+  echo -e "${BOLD}├────────────────────┬──────────────────────┤${NC}"
+
+  $RUN_CPU    && _card_row "CPU"              "$GRADE_CPU"
+  $RUN_PROC   && _card_row "Processes"        "$GRADE_Processes"
+  $RUN_MEM    && _card_row "Memory"           "$GRADE_Memory"
+  $RUN_THERM  && _card_row "Thermal"          "$GRADE_Thermal"
+  $RUN_DISK   && _card_row "Disk"             "$GRADE_Disk"
+  $RUN_AGENTS && _card_row "Launch Agents"    "$GRADE_Agents"
+  $RUN_NET    && _card_row "Network"          "$GRADE_Network"
+  $RUN_CLAUDE && _card_row "Claude Ecosystem" "$GRADE_Claude"
+
+  echo -e "${BOLD}├────────────────────┴──────────────────────┤${NC}"
+
+  # Overall grade
+  # A crit/warn verdict must still disclose unmeasured sections, or the reader
+  # assumes everything not flagged was checked and came back clean.
+  local skipnote=""
+  (( SKIPPED_COUNT > 0 )) && skipnote=" · ${SKIPPED_COUNT} not measured"
+
+  if (( TOTAL_CRITS > 0 )); then
+    printf "${BOLD}│${NC}  ${RED}${BOLD}❌ Overall: CRITICAL${NC} — %d critical, %d warn%s\n" "$TOTAL_CRITS" "$TOTAL_WARNS" "$skipnote"
+  elif (( TOTAL_WARNS > 0 )); then
+    printf "${BOLD}│${NC}  ${YELLOW}${BOLD}⚠️  Overall: WARNING${NC} — %d warning(s)%s\n" "$TOTAL_WARNS" "$skipnote"
+  elif (( SKIPPED_COUNT > 0 )); then
+    # Never "all systems nominal" when sections were never measured.
+    printf "${BOLD}│${NC}  ${DIM}⏭️  Overall: PARTIAL${NC} — %d section(s) not measurable here\n" "$SKIPPED_COUNT"
+  else
+    echo -e "${BOLD}│${NC}  ${GREEN}${BOLD}✅ Overall: HEALTHY${NC} — all systems nominal"
+  fi
+
+  # Remediation section
+  if (( FIX_COUNT > 0 )); then
+    echo -e "${BOLD}├────────────────────────────────────────────┤${NC}"
+    echo -e "${BOLD}│${NC}  ${CYAN}${BOLD}Fixes:${NC}"
+    local i
+    for (( i=0; i<FIX_COUNT; i++ )); do
+      echo -e "${BOLD}│${NC}  ${YELLOW}${REMEDIATIONS[$i]}${NC}"
+    done
+  fi
+
+  echo -e "${BOLD}╰────────────────────────────────────────────╯${NC}"
+}
+
+# === MAIN ===
+main() {
+  parse_args "$@"
+  capture_snapshot
+  print_header
+
+  # ps-dependent sections degrade to NOT MEASURED rather than reporting on an
+  # empty snapshot; check_memory additionally needs sysctl for total RAM and
+  # swap, without which its pressure maths is meaningless.
+  if $RUN_CPU; then
+    (( HAVE_PS )) && check_cpu || skip_section "CPU ANALYSIS" CPU "ps"
+  fi
+  if $RUN_PROC; then
+    if (( HAVE_PS )); then check_orphans; check_zombies
+    else skip_section "ORPHAN/GHOST PROCESSES" Processes "ps"; fi
+  fi
+  if $RUN_MEM; then
+    (( HAVE_SYSCTL )) && check_memory || skip_section "MEMORY" Memory "sysctl"
+  fi
+  $RUN_THERM  && check_thermal
+  $RUN_DISK   && check_disk
+  $RUN_AGENTS && check_launch_agents
+  $RUN_NET    && check_network
+  if $RUN_CLAUDE; then
+    (( HAVE_PS )) && check_claude_ecosystem \
+      || skip_section "CLAUDE CODE ECOSYSTEM" Claude "ps"
+  fi
+
+  print_report_card
+  $RUN_FIX && apply_fixes
+}
+
+main "$@"

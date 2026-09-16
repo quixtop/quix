@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+# (c) Shrix
+# author: shrix
+# fnd — filename search (fd) by default; -s switches to content search (rg).
+# Searches are case-insensitive by default in BOTH modes; pass --case-sensitive
+# to override (the underlying tools let the last case-flag win).
+#
+# A filename pattern containing * or ? is auto-detected as a GLOB (fd -g) —
+# no flag needed: `fnd 'ab*.mp4'` just works. A pattern is left as regex
+# instead when it also has ^ $ \ ( ) | , since those only mean something in
+# regex — this is what keeps `fnd '^ab.*\.mp4$'` running unchanged.
+#
+# Usage:
+#   fnd codebuff                     # filename: one pattern (pass-through to fd)
+#   fnd 'ab*.mp4'                    # filename: glob, auto-detected from the *
+#   fnd codebuff freebuff            # filename: multi → parallel fd, grouped output
+#   fnd codebuff, freebuff           # filename: trailing commas tolerated
+#   fnd -H codebuff freebuff         # filename: flags + multi (use -t=py for valued flags)
+#   fnd -s TODO                      # content: search TODO in cwd (passes through to rg)
+#   fnd -s 'TODO|FIXME'              # content: multi-pattern via rg regex alternation
+#   fnd -s TODO src/ docs/           # content: scope to files/folders (rg trailing paths)
+#   fnd -s --case-sensitive TODO     # content: force case-sensitive
+#
+# Note: noglob UX is added via the calling shell alias; this script doesn't see it.
+
+
+# Trailing gap — one blank line after this script's output, TTY only, so piped
+# or redirected output stays exactly the data. Fires on every exit path.
+_gap() { [ -t 1 ] && printf '\n'; return 0; }
+trap _gap EXIT
+show_help() {
+    cat <<'HELP'
+fnd — filename search (fd) by default; -s switches to content search (rg)
+Case-insensitive by default; add --case-sensitive to override.
+
+USAGE
+  fnd <pattern>                Single filename pattern (passes through to fd)
+  fnd 'ab*.mp4'                A * or ? in the pattern auto-runs as a glob
+  fnd <p1> <p2> ...            Filename multi-pattern → parallel fd, grouped output
+  fnd <p1>, <p2>               Trailing commas tolerated
+  fnd <flags> <p1> <p2>        Flags + multi (use -t=py form for flags with values)
+  fnd -s <args>...             Content search; args pass straight through to rg
+  fnd -h, --help               Show this help
+
+GLOB VS REGEX (filename mode)
+  A pattern with * or ? runs as a glob automatically — no -g needed:
+    fnd 'ab*.mp4'                 (glob: matches ab.mp4, abc.mp4, ...)
+    fnd 'file?.txt'                (glob: one wildcard char)
+  A pattern also containing ^ $ \ ( ) | stays a regex, since those only
+  mean something there:
+    fnd '^ab.*\.mp4$'             (regex: anchored, . matches any char)
+
+CONTENT MODE (-s)
+  After -s, everything is handed to ripgrep unchanged, so rg's own conventions
+  apply: trailing positionals are search paths, -e adds patterns, and any rg
+  flag works. -i is applied by default; add --case-sensitive to override.
+    fnd -s TODO src/              (search TODO inside src/)
+    fnd -s 'TODO|FIXME'           (either pattern, via regex alternation)
+    fnd -s -e TODO -e FIXME       (either pattern, via rg's native -e)
+    fnd -s -C2 TODO               (2 lines of context)
+    fnd -s --case-sensitive TODO  (force case-sensitive)
+
+EXAMPLES
+  fnd codebuff                 Find files whose name matches 'codebuff'
+  fnd codebuff freebuff        Two filename patterns, grouped output
+  fnd -s TODO                  Content search for TODO (case-insensitive) in cwd
+  fnd -s 'TODO|FIXME' src/     TODO or FIXME inside src/
+HELP
+}
+
+case "${1:-}" in
+    -h|--help) show_help; exit 0 ;;
+esac
+
+# A pattern is a GLOB when it has a wildcard (* or ?) and none of the
+# regex-only metacharacters below — those only mean something in a regex,
+# so their presence is the signal to leave the pattern alone. `*`/`?` on
+# their own are never valid regex anyway (fd already errors on a bare
+# 'ab*.mp4' as regex — 'repetition operator missing expression'), so this
+# routes real would-be-errors to glob mode at zero cost to real regexes.
+is_glob() {
+  local p="$1"
+  [[ "$p" == *[*?]* ]] || return 1
+  [[ "$p" == *['^$\()|']* ]] && return 1
+  return 0
+}
+
+# Content mode: fnd -s <args>... — hand everything to ripgrep, which already has
+# conventions for patterns (-e), paths (trailing positionals) and flags. Only the
+# -s mode-switch is ours. -i is prepended so a later --case-sensitive wins.
+if [[ "$1" == "-s" ]]; then
+  shift
+  rg -i "$@"
+  exit $?
+fi
+
+# Filename mode: split flags from positional patterns.
+flags=()
+patterns=()
+for arg in "$@"; do
+  if [[ "$arg" == -* ]]; then
+    flags+=("$arg")
+  else
+    patterns+=("${arg%,}")
+  fi
+done
+
+# Zero or one pattern: pass through to fd unchanged (case-insensitive baseline).
+if (( ${#patterns[@]} <= 1 )); then
+  glob_flag=()
+  (( ${#patterns[@]} == 1 )) && is_glob "${patterns[0]}" && glob_flag=(-g)
+  fd -i "${glob_flag[@]}" "${flags[@]}" "${patterns[@]}"
+  exit $?
+fi
+
+# Multi-pattern: parallel fd per pattern, grouped output in input order.
+# Force color when final stdout is a tty; tempfiles otherwise strip ANSI.
+if [[ -t 1 ]]; then
+  color=(--color=always)
+else
+  color=()
+fi
+
+tmps=()
+for p in "${patterns[@]}"; do
+  t=$(mktemp)
+  tmps+=("$t")
+  glob_flag=()
+  is_glob "$p" && glob_flag=(-g)
+  fd -i "${color[@]}" "${glob_flag[@]}" "${flags[@]}" "$p" > "$t" &
+done
+wait
+
+for i in "${!patterns[@]}"; do
+  t="${tmps[i]}"
+  count=$(wc -l < "$t" | tr -d ' ')
+  printf '── %s (%d) ──\n' "${patterns[i]}" "$count"
+  cat "$t"
+  rm -f "$t"
+done

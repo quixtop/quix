@@ -1,0 +1,501 @@
+#!/usr/bin/env bash
+# (c) Shrix
+# author: shrix
+# rmApp — remove a Mac app and ALL its on-disk traces (~/Library, workspace dirs, PATH shims).
+#
+# Usage:
+#   rmApp <AppName>              Preview what would be deleted, then prompt [y/N].
+#   rmApp -f <AppName>           Force — skip the prompt, delete immediately.
+#   rmApp --keep-bundle <AppName>  Clean residue only, leave /Applications/<AppName>.app alone.
+#   rmApp --sweep-shims          Remove dangling CLI shims (from any removed app) across PATH dirs.
+#   rmApp -h | --help            Show this help.
+#
+# Examples:
+#   rmApp Slack                  Preview Slack's footprint, prompt before deleting.
+#   rmApp -f "Spark Desktop"     Wipe Spark Desktop without prompting.
+#   rmApp --keep-bundle Notion   Clear Notion's caches/data but keep the app.
+#
+#   rmApp Arturia               A vendor FOLDER — removes every .app inside it,
+#                               each app's residue, and the folder itself.
+#
+# What it does (in order):
+#   1. Find the bundle across /Applications, ~/Applications, /Applications/Setapp
+#      and /Applications/Utilities, in three shapes:
+#        a. <root>/<name>.app                 — the usual case
+#        b. <root>/<vendor>/<name>.app        — nested, e.g. Arturia/Analog Lab V
+#        c. <root>/<name>/ holding .app files — the vendor folder itself
+#      Extract every bundle ID found via `defaults read`.
+#   2. Quit the app gracefully via osascript.
+#   3. Build a candidate list across 13 standard residue locations, matching by
+#      both bundle ID AND app name (handles Electron apps, vendor folders, etc.).
+#   4. Show preview with sizes; prompt unless -f.
+#   5. rm -rf each path; report total reclaimed.
+#
+# Safety:
+#   - Refuses bundle IDs starting with com.apple.* and a list of system apps
+#     (Finder, Safari, Mail, Messages, Terminal, etc.).
+#   - Refuses names shorter than 3 characters.
+#   - Never touches /System or /Library/ system paths (only /Library/LaunchAgents,
+#     /Library/LaunchDaemons, /Library/PrivilegedHelperTools, all keyed on bundle ID).
+#   - Dry-run by default — must explicitly confirm or pass -f.
+set -u
+
+# Trailing gap — one blank line after this script's output, TTY only, so piped
+# or redirected output stays exactly the data. Fires on every exit path.
+_gap() { [ -t 1 ] && printf '\n'; return 0; }
+trap _gap EXIT
+
+# ─── Arg parsing ────────────────────────────────────────────────────────────
+FORCE=0
+KEEP_BUNDLE=0
+SWEEP_SHIMS=0
+APP_NAME=""
+
+show_help() { awk 'NR==1 { next } /^# \(c\)/ { next } /^# author:/ { next } /^#/ { sub(/^# ?/,""); print; next } { exit }' "$0"; }
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) show_help; exit 0 ;;
+    -f|--force) FORCE=1; shift ;;
+    --keep-bundle) KEEP_BUNDLE=1; shift ;;
+    --sweep-shims) SWEEP_SHIMS=1; shift ;;
+    -*) echo "rmApp: unknown flag '$1' (try -h)" >&2; exit 1 ;;
+    *)
+      if [ -z "$APP_NAME" ]; then APP_NAME="$1"
+      else echo "rmApp: too many positional args (got '$APP_NAME' and '$1')" >&2; exit 1
+      fi
+      shift ;;
+  esac
+done
+
+if [ "$SWEEP_SHIMS" != "1" ]; then
+  if [ -z "$APP_NAME" ]; then echo "rmApp: missing app name (try -h)" >&2; exit 1; fi
+  if [ "${#APP_NAME}" -lt 3 ]; then echo "rmApp: refusing — name too short ('$APP_NAME')" >&2; exit 1; fi
+fi
+
+# ─── Colors (only if stdout is a tty) ───────────────────────────────────────
+if [ -t 1 ]; then
+  C_RED=$'\033[31m'; C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'
+  C_BLUE=$'\033[34m'; C_DIM=$'\033[2m'; C_BOLD=$'\033[1m'; C_RESET=$'\033[0m'
+else
+  C_RED=""; C_GREEN=""; C_YELLOW=""; C_BLUE=""; C_DIM=""; C_BOLD=""; C_RESET=""
+fi
+
+# PATH bin dirs an app may drop a CLI launcher into
+BIN_DIRS=("$HOME/.local/bin" "/usr/local/bin" "/opt/homebrew/bin" "$HOME/bin")
+# …plus the LIVE brew prefix: the two literals above cover the Intel and Apple-silicon defaults, but a
+# relocated install (or a macOS that moves it) would otherwise be swept past. Appended, never
+# substituted — swapping a literal for $(brew --prefix) drops whichever arch is not the current one.
+if command -v brew >/dev/null 2>&1; then
+  _bp="$(brew --prefix 2>/dev/null)/bin"
+  case " ${BIN_DIRS[*]} " in *" $_bp "*) ;; *) [ "$_bp" != "/bin" ] && BIN_DIRS+=("$_bp") ;; esac
+  unset _bp
+fi
+
+# ─── --sweep-shims: clear dangling CLI symlinks across PATH bin dirs ─────────
+if [ "$SWEEP_SHIMS" = "1" ]; then
+  declare -a DEAD=()
+  for bd in "${BIN_DIRS[@]}"; do
+    [ -d "$bd" ] || continue
+    for f in "$bd"/*; do [ -L "$f" ] && [ ! -e "$f" ] && DEAD+=("$f"); done
+  done
+  if [ "${#DEAD[@]}" -eq 0 ]; then echo "${C_YELLOW}rmApp: no dangling CLI shims found.${C_RESET}"; exit 0; fi
+  echo "${C_BOLD}rmApp --sweep-shims${C_RESET} — dangling CLI shims (target gone):"; echo ""
+  for f in "${DEAD[@]}"; do printf "  ${C_RED}✗${C_RESET} %s ${C_DIM}→ %s${C_RESET}\n" "$f" "$(readlink "$f")"; done
+  echo ""
+  if [ "$FORCE" != "1" ]; then
+    printf "Remove these %d dead shim(s)? %s[y/N]%s " "${#DEAD[@]}" "$C_YELLOW" "$C_RESET"
+    read -r answer
+    case "${answer,,}" in y|yes) ;; *) echo "${C_DIM}aborted — nothing removed${C_RESET}"; exit 0 ;; esac
+  fi
+  for f in "${DEAD[@]}"; do
+    if rm -f "$f" 2>/dev/null; then printf "  ${C_GREEN}✓${C_RESET} %s\n" "$f"; else printf "  ${C_RED}✗${C_RESET} %s\n" "$f"; fi
+  done
+  echo "${C_GREEN}${C_BOLD}Done.${C_RESET} Cleared ${#DEAD[@]} dead shim(s)."
+  exit 0
+fi
+
+# ─── Locate the .app(s) and extract bundle ID(s) ───────────────────────────
+# Three shapes, tried in order. Plain <root>/<name>.app is the common case, but
+# several vendors ship a FOLDER instead — Arturia/, WD Discovery/, Python 3.x/ —
+# and an app one level down used to be invisible to every lookup here.
+APP_ROOTS=("/Applications" "$HOME/Applications" "/Applications/Setapp" "/Applications/Utilities")
+declare -a APP_PATHS=()
+VENDOR_DIR=""
+SPOTLIGHT_OFF=0
+
+# 1. direct — /Applications/Slack.app
+for d in "${APP_ROOTS[@]}"; do
+  if [ -d "$d/${APP_NAME}.app" ]; then APP_PATHS+=("$d/${APP_NAME}.app"); break; fi
+done
+
+# 2. nested — /Applications/Arturia/Analog Lab V.app
+if [ "${#APP_PATHS[@]}" -eq 0 ]; then
+  shopt -s nullglob
+  for d in "${APP_ROOTS[@]}"; do
+    for m in "$d"/*/"${APP_NAME}.app"; do
+      [ -d "$m" ] && APP_PATHS+=("$m")
+    done
+  done
+  shopt -u nullglob
+fi
+
+# 3. the vendor folder itself — `rmApp Arturia`, meaning everything under it.
+#    Expands to every .app inside, and the folder joins the deletion list.
+if [ "${#APP_PATHS[@]}" -eq 0 ]; then
+  shopt -s nullglob
+  for d in "${APP_ROOTS[@]}"; do
+    [ -d "$d/$APP_NAME" ] || continue
+    inner=("$d/$APP_NAME"/*.app)
+    if [ "${#inner[@]}" -gt 0 ]; then
+      VENDOR_DIR="$d/$APP_NAME"
+      APP_PATHS+=("${inner[@]}")
+      break
+    fi
+  done
+  shopt -u nullglob
+fi
+
+# Every bundle ID we found — a vendor folder legitimately yields several.
+declare -a BIDS=()
+for ap in ${APP_PATHS[@]+"${APP_PATHS[@]}"}; do
+  b=$(defaults read "$ap/Contents/Info" CFBundleIdentifier 2>/dev/null | tr -d '\n')
+  [ -n "$b" ] && BIDS+=("$b")
+done
+
+# Fallback: nothing on disk — ask Spotlight for a stale BID, but ONLY if it is
+# actually running. mdfind returns empty on a disabled index exactly as it does
+# for a genuine miss, so an unguarded call reports "not found" for both.
+if [ "${#BIDS[@]}" -eq 0 ]; then
+  if mdutil -s / 2>/dev/null | grep -qi 'indexing enabled'; then
+    b=$(mdfind "kMDItemFSName == '${APP_NAME}.app'" 2>/dev/null | head -1 \
+        | xargs -I{} defaults read "{}/Contents/Info" CFBundleIdentifier 2>/dev/null | tr -d '\n')
+    [ -n "$b" ] && BIDS+=("$b")
+  else
+    SPOTLIGHT_OFF=1
+  fi
+fi
+
+# Primary path/BID — kept for the single-value uses further down.
+APP_PATH="${APP_PATHS[0]:-}"
+BID="${BIDS[0]:-}"
+
+# ─── Safety guard: refuse system apps ──────────────────────────────────────
+# Check EVERY bundle ID, not just the first — a vendor folder yields several,
+# and one Apple bundle among them must veto the whole operation.
+for b in ${BIDS[@]+"${BIDS[@]}"}; do
+  case "${b,,}" in
+    com.apple.*) echo "${C_RED}rmApp: refusing — '$b' is an Apple system app${C_RESET}" >&2; exit 1 ;;
+  esac
+done
+case "${APP_NAME,,}" in
+  finder|safari|mail|messages|terminal|system\ preferences|system\ settings|spotlight|dock|notes|reminders|calendar|photos|preview|maps|facetime|launchpad|musi*|tv|home|news|stocks|books|contacts|clock|calculator|weather|time\ machine)
+    echo "${C_RED}rmApp: refusing — '$APP_NAME' is a system app${C_RESET}" >&2; exit 1 ;;
+esac
+
+# ─── Build candidate path list ─────────────────────────────────────────────
+declare -a CANDS=()
+add_cand() { [ -e "$1" ] && CANDS+=("$1"); }
+add_glob() {
+  # Expand glob safely (zsh-safe via 2>/dev/null and explicit loop)
+  for m in "$@"; do [ -e "$m" ] && CANDS+=("$m"); done
+}
+
+# Launch jobs and privileged helpers a bundle installs.
+#
+# An exact "<BID>.plist" match misses the common vendor pattern of SUFFIXING the
+# bundle id for helper jobs: a vendor whose app is com.acme.Suite ships its
+# updater as com.acme.SuiteAgent.plist. Removing the app while leaving that
+# behind is how orphaned agents accumulate — measured on this Mac, where
+# AnyDesk, Adobe and Microsoft all left live jobs after their apps were gone.
+#
+# NOTE: no real bundle id belongs in this file. The shim scan below greps every
+# script on PATH for the ids being removed, so a literal id written here makes
+# rmApp match ITSELF and offer to delete itself. Keep examples fictional.
+#
+# Accept "<BID>.plist", "<BID>.<anything>.plist", and "<BID><KnownSuffix>.plist"
+# — but never a bare prefix match, which would also sweep up an unrelated
+# com.vendor.FooBar when removing com.vendor.Foo.
+add_launch_jobs() {
+  local b="$1" dir f rest
+  for dir in "$HOME/Library/LaunchAgents" "/Library/LaunchAgents" \
+             "/Library/LaunchDaemons"; do
+    [ -d "$dir" ] || continue
+    shopt -s nullglob
+    for f in "$dir/$b"*.plist; do
+      rest="${f#"$dir/$b"}"; rest="${rest%.plist}"
+      case "$rest" in
+        "" | .*) add_cand "$f" ;;
+        Agent|Helper|Updater|Daemon|Service|Launcher|XPCService) add_cand "$f" ;;
+      esac
+    done
+    shopt -u nullglob
+  done
+  # Privileged helpers follow the same suffixing habit.
+  shopt -s nullglob
+  for f in "/Library/PrivilegedHelperTools/$b"*; do
+    rest="${f#"/Library/PrivilegedHelperTools/$b"}"
+    case "$rest" in
+      "" | .*) add_cand "$f" ;;
+      Agent|Helper|Updater|Daemon|Service) add_cand "$f" ;;
+    esac
+  done
+  shopt -u nullglob
+}
+
+# The .app bundle(s) themselves (unless --keep-bundle). When the target was a
+# vendor folder, the folder goes too — otherwise an empty shell is left behind.
+if [ "$KEEP_BUNDLE" = "0" ]; then
+  for ap in ${APP_PATHS[@]+"${APP_PATHS[@]}"}; do add_cand "$ap"; done
+  [ -n "$VENDOR_DIR" ] && add_cand "$VENDOR_DIR"
+fi
+
+# Workspace root in $HOME (Conductor-style)
+add_cand "$HOME/${APP_NAME}"
+add_cand "$HOME/.${APP_NAME,,}"
+
+# By bundle ID — once per ID, so a vendor folder cleans up after every app
+# inside it rather than only the first one found.
+for b in ${BIDS[@]+"${BIDS[@]}"}; do
+  add_cand "$HOME/Library/Application Support/$b"
+  add_cand "$HOME/Library/Caches/$b"
+  add_cand "$HOME/Library/Preferences/${b}.plist"
+  add_cand "$HOME/Library/Logs/$b"
+  add_cand "$HOME/Library/WebKit/$b"
+  add_cand "$HOME/Library/HTTPStorages/$b"
+  add_cand "$HOME/Library/HTTPStorages/${b}.binarycookies"
+  add_cand "$HOME/Library/Saved Application State/${b}.savedState"
+  add_cand "$HOME/Library/Containers/$b"
+  add_launch_jobs "$b"
+  # Group Containers (team-id prefixed)
+  shopt -s nullglob 2>/dev/null
+  add_glob "$HOME/Library/Group Containers/"*."$b"
+  add_glob "$HOME/Library/Preferences/ByHost/${b}".*.plist
+  shopt -u nullglob 2>/dev/null
+done
+
+# By app name (handles Electron / vendor-folder cases like Slack, Notion,
+# Discord). Covers the searched name AND each bundle's own name, which differ
+# whenever the target was a vendor folder.
+declare -a NAME_KEYS=("$APP_NAME")
+for ap in ${APP_PATHS[@]+"${APP_PATHS[@]}"}; do
+  n=$(basename "$ap" .app)
+  [ "$n" = "$APP_NAME" ] || NAME_KEYS+=("$n")
+done
+for n in "${NAME_KEYS[@]}"; do
+  add_cand "$HOME/Library/Application Support/$n"
+  add_cand "$HOME/Library/Caches/$n"
+  add_cand "$HOME/Library/Logs/$n"
+  add_cand "$HOME/Library/Preferences/$n"
+  add_cand "$HOME/Library/HTTPStorages/$n"
+done
+
+# CLI shims in PATH bin dirs — the launcher the app dropped into your PATH
+# (`code`, `cursor`, `warp`…): a symlink INTO the bundle, or a wrapper script
+# referencing it. Included even when dangling (bundle already gone).
+# Match a symlink target against every bundle we found, not just the first.
+refs_bundle() {
+  local hay="$1" ap n b
+  for ap in ${APP_PATHS[@]+"${APP_PATHS[@]}"}; do [[ "$hay" == "$ap"/* ]] && return 0; done
+  for n in "${NAME_KEYS[@]}"; do [[ "$hay" == *"/${n}.app/"* ]] && return 0; done
+  for b in ${BIDS[@]+"${BIDS[@]}"}; do [[ "$hay" == *"$b"* ]] && return 0; done
+  return 1
+}
+file_refs_bundle() {
+  local f="$1" n b
+  for n in "${NAME_KEYS[@]}"; do grep -qF "/${n}.app/" "$f" 2>/dev/null && return 0; done
+  for b in ${BIDS[@]+"${BIDS[@]}"}; do grep -qF "$b" "$f" 2>/dev/null && return 0; done
+  return 1
+}
+
+# Hard guard: rmApp must never delete itself. The grep above matches any script
+# that merely MENTIONS a bundle id, which includes this one and any notes or
+# wrappers the user keeps on PATH. Compared by device:inode so the check holds
+# through symlinks (~/bin/rmApp -> ~/.local/bin/rmApp) and renames.
+SELF_ID=$(stat -f '%d:%i' "$0" 2>/dev/null)
+is_self() {
+  [ -n "$SELF_ID" ] || return 1
+  [ "$(stat -f '%d:%i' "$1" 2>/dev/null)" = "$SELF_ID" ]
+}
+
+for bd in "${BIN_DIRS[@]}"; do
+  [ -d "$bd" ] || continue
+  for f in "$bd"/*; do
+    is_self "$f" && continue
+    fname=$(basename "$f")
+    if [ -L "$f" ]; then
+      if refs_bundle "$(readlink "$f")"; then
+        CANDS+=("$f")
+        continue
+      fi
+    elif [ -f "$f" ] && file "$f" 2>/dev/null | grep -qiE 'text|script'; then
+      if file_refs_bundle "$f"; then
+        CANDS+=("$f")
+        continue
+      fi
+    fi
+    # Standalone binaries (compiled Go/Rust/etc CLIs) carry no symlink or
+    # readable bundle reference to match on — only the filename itself.
+    if [ -f "$f" ]; then
+      for n in "${NAME_KEYS[@]}"; do
+        if [[ "${fname,,}" == "${n,,}" ]]; then CANDS+=("$f"); break; fi
+      done
+    fi
+  done
+done
+
+# Dedup
+if [ "${#CANDS[@]}" -gt 0 ]; then
+  IFS=$'\n' read -r -d '' -a CANDS < <(printf '%s\n' "${CANDS[@]}" | awk '!seen[$0]++' && printf '\0')
+fi
+
+# ─── Fallback: deep scan one level into vendor folders ─────────────────────
+# Catches Chromium channels (Brave-Browser-Beta inside BraveSoftware/),
+# JetBrains IDE versions, individual Adobe apps inside Adobe/, etc.
+# Only runs when the standard lookup turned up nothing — keeps the common
+# case fast and avoids false positives.
+if [ "${#CANDS[@]}" -eq 0 ]; then
+  shopt -s nullglob nocaseglob 2>/dev/null
+  for parent in "$HOME/Library/Application Support"/*/ "$HOME/Library/Caches"/*/; do
+    for child in "$parent"*; do
+      child_name=$(basename "$child")
+      # Match if child name equals or contains the search term (case-insensitive)
+      if [[ "${child_name,,}" == "${APP_NAME,,}" || "${child_name,,}" == *"${APP_NAME,,}"* ]]; then
+        # Reject very loose substring matches by requiring the search term be >= 5 chars
+        # OR be an exact name match
+        if [ "${#APP_NAME}" -ge 5 ] || [ "${child_name,,}" = "${APP_NAME,,}" ]; then
+          [ -e "$child" ] && CANDS+=("$child")
+        fi
+      fi
+    done
+  done
+  shopt -u nullglob nocaseglob 2>/dev/null
+  # Dedup again
+  if [ "${#CANDS[@]}" -gt 0 ]; then
+    IFS=$'\n' read -r -d '' -a CANDS < <(printf '%s\n' "${CANDS[@]}" | awk '!seen[$0]++' && printf '\0')
+    DEEP_SCAN_USED=1
+  fi
+fi
+
+# ─── Absorb a vendor folder that would be left empty ───────────────────────
+# `rmApp "WD Discovery"` matches the nested bundle and would leave the folder
+# behind holding nothing. Take the parent too, but ONLY when every .app inside
+# it is already being removed, and never a search root itself.
+if [ "${#CANDS[@]}" -gt 0 ]; then
+  shopt -s nullglob
+  declare -a PARENTS=()
+  for p in "${CANDS[@]}"; do
+    [[ "$p" == *.app ]] || continue
+    parent=$(dirname "$p")
+    is_root=0
+    for d in "${APP_ROOTS[@]}"; do [ "$parent" = "$d" ] && is_root=1; done
+    [ "$is_root" -eq 1 ] && continue
+    all_going=1
+    for sib in "$parent"/*.app; do
+      found=0
+      for c in "${CANDS[@]}"; do [ "$c" = "$sib" ] && { found=1; break; }; done
+      [ "$found" -eq 0 ] && { all_going=0; break; }
+    done
+    [ "$all_going" -eq 1 ] && PARENTS+=("$parent")
+  done
+  for p in ${PARENTS[@]+"${PARENTS[@]}"}; do add_cand "$p"; done
+  shopt -u nullglob
+fi
+
+# ─── Prune candidates nested inside another candidate ──────────────────────
+# `rm -rf` on a parent already takes its children, so keeping both deletes
+# nothing extra but DOUBLE-COUNTS the size: a vendor folder plus the two apps
+# inside it reported 179.5 MB for 89.7 MB of actual disk.
+if [ "${#CANDS[@]}" -gt 1 ]; then
+  declare -a PRUNED=()
+  for p in "${CANDS[@]}"; do
+    nested=0
+    for q in "${CANDS[@]}"; do
+      [ "$p" = "$q" ] && continue
+      if [[ "$p" == "$q"/* ]]; then nested=1; break; fi
+    done
+    [ "$nested" -eq 0 ] && PRUNED+=("$p")
+  done
+  CANDS=("${PRUNED[@]}")
+fi
+
+# ─── Exit early if nothing to do ───────────────────────────────────────────
+if [ "${#CANDS[@]}" -eq 0 ]; then
+  echo "${C_YELLOW}rmApp: no traces of '$APP_NAME' found.${C_RESET}"
+  [ -n "$BID" ] && echo "${C_DIM}  (searched bundle ID: $BID)${C_RESET}"
+  # A bare "not found" is misleading when the name IS visible in Finder as a
+  # vendor folder, or when Spotlight was unavailable to answer at all.
+  shopt -s nullglob
+  near=()
+  for d in "${APP_ROOTS[@]}"; do
+    for m in "$d"/*/*.app; do
+      bn=$(basename "$m" .app); pn=$(basename "$(dirname "$m")")
+      if [[ "${bn,,}" == *"${APP_NAME,,}"* || "${pn,,}" == *"${APP_NAME,,}"* ]]; then
+        near+=("${m#/Applications/}")
+      fi
+    done
+  done
+  shopt -u nullglob
+  if [ "${#near[@]}" -gt 0 ]; then
+    echo "${C_DIM}  nested app(s) matching that name — pass one by its own name:${C_RESET}"
+    for m in "${near[@]}"; do echo "${C_DIM}    · $m${C_RESET}"; done
+  fi
+  [ "$SPOTLIGHT_OFF" = "1" ] && echo "${C_DIM}  (Spotlight indexing is off, so the stale-bundle lookup was skipped)${C_RESET}"
+  exit 0
+fi
+
+# ─── Preview ───────────────────────────────────────────────────────────────
+echo "${C_BOLD}rmApp${C_RESET} → ${C_BLUE}${APP_NAME}${C_RESET}${BID:+ ${C_DIM}($BID)${C_RESET}}"
+# A vendor folder deletes several apps at once — name them before the prompt,
+# never let that hide behind one folder name in the preview.
+if [ -n "$VENDOR_DIR" ]; then
+  echo "${C_YELLOW}  vendor folder — removing ${#APP_PATHS[@]} app(s) inside it:${C_RESET}"
+  for ap in "${APP_PATHS[@]}"; do echo "${C_DIM}    · $(basename "$ap" .app)${C_RESET}"; done
+fi
+echo ""
+TOTAL_KB=0
+for p in "${CANDS[@]}"; do
+  kb=$(du -sk "$p" 2>/dev/null | awk '{print $1}')
+  kb=${kb:-0}
+  TOTAL_KB=$((TOTAL_KB + kb))
+  if   [ "$kb" -ge 1048576 ]; then h=$(awk -v k="$kb" 'BEGIN{printf "%.2fG", k/1048576}')
+  elif [ "$kb" -ge 1024 ];    then h=$(awk -v k="$kb" 'BEGIN{printf "%.1fM", k/1024}')
+  else h="${kb}K"; fi
+  printf "  %s%-9s%s  %s\n" "${C_DIM}" "$h" "${C_RESET}" "$p"
+done
+if   [ "$TOTAL_KB" -ge 1048576 ]; then TOTAL_H=$(awk -v k="$TOTAL_KB" 'BEGIN{printf "%.2f GB", k/1048576}')
+elif [ "$TOTAL_KB" -ge 1024 ];    then TOTAL_H=$(awk -v k="$TOTAL_KB" 'BEGIN{printf "%.1f MB", k/1024}')
+else TOTAL_H="${TOTAL_KB} KB"; fi
+echo ""
+echo "${C_BOLD}Total:${C_RESET} $TOTAL_H across ${#CANDS[@]} path$([ "${#CANDS[@]}" = "1" ] || echo s)"
+echo ""
+
+# ─── Confirm (unless -f) ───────────────────────────────────────────────────
+if [ "$FORCE" != "1" ]; then
+  printf "Delete all of the above? %s[y/N]%s " "${C_YELLOW}" "${C_RESET}"
+  read -r answer
+  case "${answer,,}" in
+    y|yes) ;;
+    *) echo "${C_DIM}aborted — nothing deleted${C_RESET}"; exit 0 ;;
+  esac
+fi
+
+# ─── Quit running app ──────────────────────────────────────────────────────
+# Quit every bundle we're about to delete, not just the searched name — a
+# vendor folder's apps would otherwise still hold file handles open.
+for n in "${NAME_KEYS[@]}"; do
+  osascript -e "tell application \"$n\" to quit" 2>/dev/null
+done
+sleep 1  # give them a moment to release file handles
+
+# ─── Delete ────────────────────────────────────────────────────────────────
+echo ""
+for p in "${CANDS[@]}"; do
+  if rm -rf "$p" 2>/dev/null; then
+    printf "  ${C_GREEN}✓${C_RESET} %s\n" "$p"
+  else
+    printf "  ${C_RED}✗${C_RESET} %s ${C_DIM}(check perms)${C_RESET}\n" "$p"
+  fi
+done
+echo ""
+echo "${C_GREEN}${C_BOLD}Done.${C_RESET} Freed ~$TOTAL_H."

@@ -1,0 +1,280 @@
+#!/usr/bin/env bash
+# (c) Shrix
+# author: shrix
+# appReso — per-app CPU/memory rollup on macOS.
+#
+#   appReso <appName> [appName...]     totals per app
+#   appReso -v <appName>               + the individual processes
+#
+# Rolls every process belonging to an app into one row, which is the whole
+# point: modern browsers and Electron apps fan out into dozens of helper
+# processes, so a plain `ps | grep` shows fragments rather than a footprint.
+
+set -uo pipefail
+
+# Trailing gap — one blank line after this script's output, TTY only, so piped
+# or redirected output stays exactly the data. Fires on every exit path.
+_gap() { [ -t 1 ] && printf '\n'; return 0; }
+trap _gap EXIT
+
+usage() {
+  cat <<'EOF'
+appReso — per-app CPU/memory rollup (macOS)
+
+  appReso                          EVERY running app, heaviest first
+  appReso <appName> [appName...]   one total row per named app
+  appReso --now                    everything, with live numbers
+  appReso -v <appName>             also list matching processes
+
+  -a, --all       every app (the default when no name is given)
+  -n, --now       live CPU + footprint memory (slower: samples top twice)
+  -v, --verbose   show each matching process
+  -h, --help      this text
+
+-a groups by the OUTERMOST *.app bundle, so helper processes roll into their
+parent (Arc Helper (GPU).app -> Arc). Processes with no .app bundle — daemons,
+node, python — are not apps and are left out; use top for those.
+
+Matching is two-pass, so a short name can't quietly over-match:
+  1. exact bundle match  "<name>.app"           ← preferred
+  2. loose substring     anywhere in the args   ← only if pass 1 finds none,
+                                                  and the row is marked ~
+
+What the columns mean — the default is FAST, --now is ACCURATE:
+
+  default (ps, one syscall, instant)
+    cpu%avg  CPU averaged over each process's LIFETIME, not right now. A
+             browser open for hours reads low even while pegged.
+    rss      summed resident memory. OVER-counts: helper processes share
+             pages and each reports them, so 34 Zen procs count the same
+             library 34 times. Reads higher than the truth.
+
+  --now (top sampled twice + ps for identity; costs ~2s)
+    cpu%now  the delta between two samples — actual current usage.
+    memory   top's footprint figure, the same one Activity Monitor shows.
+             Attributes shared pages once, so it does NOT over-count.
+
+  Rule of thumb: default to rank and compare, --now to quote a number.
+EOF
+}
+
+# Bare-word aliases (`verbose`, `help`) are deliberately NOT accepted: every
+# positional here is a free-form app name, so a bare word is ambiguous.
+verbose=0
+apps=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)    usage; exit 0 ;;
+    -v|--verbose) verbose=1 ;;
+    -n|--now)     now=1 ;;
+    -a|--all)     all=1 ;;
+    --)           shift; while [ $# -gt 0 ]; do apps+=("$1"); shift; done ;;
+    -*)           printf 'appReso: unknown flag: %s\n\n' "$1" >&2; usage >&2; exit 64 ;;
+    *)            apps+=("$1") ;;
+  esac
+  shift
+done
+
+# Bare `appReso` means "everything", not a usage error: the most common
+# question is "what is eating this machine", and answering it should not
+# require knowing the app's name first. -a is the explicit spelling.
+# Bare `appReso` surveys every app you use. -a additionally includes the
+# system plumbing (/System/Library agents, framework helpers) that would
+# otherwise bury the list.
+survey=0
+[ ${#apps[@]} -eq 0 ] && survey=1
+if [ "${all:-0}" -eq 1 ] && [ ${#apps[@]} -gt 0 ]; then
+  echo "appReso: -a surveys every app; ignoring the named ones." >&2
+  apps=(); survey=1
+fi
+[ "${all:-0}" -eq 1 ] && survey=1
+
+scale() {
+  # MiB in -> "512M" or "4.98G". The units stay BINARY (÷1024) because that is
+  # what ps reports; dividing by 1000 would read ~7% low against Activity
+  # Monitor. Suffix is spelled out so the ambiguity never has to be resolved
+  # by the reader.
+  local m="${1:-0}"
+  if [ "$m" -ge 1024 ] 2>/dev/null; then
+    awk -v m="$m" 'BEGIN { printf "%.2fG", m / 1024 }'
+  else
+    printf '%dM' "$m"
+  fi
+}
+
+snapshot=$(ps -Ao pid,%cpu,rss,args 2>/dev/null)
+if [ -z "$snapshot" ]; then
+  echo "appReso: could not read the process table (ps returned nothing)." >&2
+  echo "            If you are inside a sandbox, run this from a normal shell." >&2
+  exit 70
+fi
+
+if [ "${now:-0}" -eq 1 ]; then
+  # top -l 2 samples twice: the FIRST block is cumulative (same lie as ps), the
+  # SECOND is the delta between samples — the only one that means "right now".
+  # Keep the last block by resetting the buffer at every header.
+  #
+  # top's COMMAND column is truncated (~16 chars), so it cannot identify an app
+  # on its own; PID is the join key back to ps, which carries full args.
+  # top's MEM is a footprint figure — what Activity Monitor shows — so it does
+  # NOT double-count the shared pages that inflate the ps/RSS path.
+  # No -n: in logging mode top lists every process by default. An explicit
+  # -n 9999 was a guess at "give me all of them" and is the prime suspect for
+  # top returning nothing — asking for a count far beyond the process table is
+  # not obviously valid, and the working probe used a small -n.
+  live=$(top -l 2 -o cpu -stats pid,command,cpu,mem 2>/dev/null \
+    | awk '/^ *PID/ { buf = ""; next } { buf = buf $0 "\n" } END { printf "%s", buf }')
+  # grep -c PRINTS 0 and EXITS 1 on no match, so `|| echo 0` would append a
+  # second zero and break the numeric test. No fallback needed.
+  live_rows=$(printf '%s' "$live" | grep -c '[0-9]' 2>/dev/null)
+  # Threshold is 1, not 2: the header is already stripped above, so any row at
+  # all is real data. Requiring 2 rejected a legitimate single-process result.
+  if [ "${live_rows:-0}" -lt 1 ]; then
+    # Report the SHAPE of the failure, not just its existence: "top gave us
+    # nothing" and "top gave us rows we could not parse" need different fixes,
+    # and an empty table would hide both.
+    echo "appReso: --now could not read live data from top (parsed ${live_rows:-0} rows)." >&2
+    echo "         Check with:  top -l 2 -o cpu -stats pid,command,cpu,mem | tail -5" >&2
+    echo "         The fast path still works:  appReso ${apps[*]:-}" >&2
+    exit 70
+  fi
+fi
+
+if [ "${now:-0}" -eq 1 ]; then
+  printf '  %-18s %6s %10s %10s\n' "app" "procs" "cpu%now" "memory"
+else
+  printf '  %-18s %6s %10s %10s\n' "app" "procs" "cpu%avg" "rss"
+fi
+printf '  %s\n' "------------------------------------------------"
+
+if [ "$survey" -eq 1 ]; then
+  # One pass grouping by BUNDLE instead of N passes by name. The bundle is the
+  # OUTERMOST *.app in the path: helpers live at
+  # /Applications/Arc.app/Contents/Frameworks/Arc Helper (GPU).app/... so
+  # taking the first match rolls every helper into its parent, which is the
+  # whole point of the tool.
+  printf 'LIVE\n%s\nPSTAB\n%s\n' "${live:-}" "$snapshot" | awk -v now="${now:-0}" -v showall="${all:-0}" '
+    function tomib(s,   u, n) {
+      gsub(/[+-]$/, "", s)
+      u = substr(s, length(s), 1); n = substr(s, 1, length(s) - 1) + 0
+      if (u == "K") return n / 1024
+      if (u == "M") return n
+      if (u == "G") return n * 1024
+      return (s + 0) / 1048576
+    }
+    function bundle(s) {
+      if (match(s, /\/[^\/]+\.app\//)) return substr(s, RSTART + 1, RLENGTH - 6)
+      return ""
+    }
+    # "An app you use" == it lives in an Applications folder: /Applications,
+    # ~/Applications, or /System/Applications (where Apple keeps Safari, Mail).
+    # Everything else with a .app suffix is plumbing — /System/Library
+    # CoreServices, framework helpers, XPC agents — the rows that made the
+    # first version unreadable. -a lets them back in.
+    function isuserapp(s) { return (s ~ /\/Applications\//) }
+    $0 == "LIVE"  { mode = "L"; next }
+    $0 == "PSTAB" { mode = "P"; next }
+    mode == "L" && NF >= 3 { cpu[$1] = $(NF-1) + 0; mem[$1] = tomib($NF); next }
+    mode == "P" && NR > 1 {
+      b = bundle($0); if (b == "") next          # not an app bundle — skip
+      if (showall == 0 && !isuserapp($0)) next   # plumbing — hidden unless -a
+      pid = $1 + 0
+      if (now == 1) {
+        if (!(pid in mem)) next                  # died between samples
+        n[b]++; c[b] += cpu[pid]; m[b] += mem[pid]
+      } else {
+        n[b]++; c[b] += $2; m[b] += $3 / 1024
+      }
+    }
+    END { for (b in n) printf "%s\t%d\t%.1f\t%.0f\n", b, n[b], c[b], m[b] }
+  ' | sort -t"$(printf '\t')" -k4 -rn > "${TMPDIR:-/tmp}/.appReso.$$"
+  rows=$(grep -c . "${TMPDIR:-/tmp}/.appReso.$$" 2>/dev/null)
+  if [ "${rows:-0}" -eq 0 ]; then
+    # An empty table reads as "nothing is running", which is never true. Say
+    # what was actually searched so the failure points at its own cause.
+    rm -f "${TMPDIR:-/tmp}/.appReso.$$"
+    echo "  (no apps matched)" >&2
+    printf '     searched %s processes' "$(printf '%s' "$snapshot" | grep -c .)" >&2
+    [ "${now:-0}" -eq 1 ] && printf ', joined against %s live rows' "${live_rows:-0}" >&2
+    printf '\n' >&2
+    [ "${all:-0}" -eq 0 ] && echo "     only /Applications bundles are shown — try -a" >&2
+    exit 75
+  fi
+  while IFS="$(printf '\t')" read -r b nn cc mm; do
+    printf '  %-18s %6d %10.1f %10s\n' "${b:0:18}" "$nn" "$cc" "$(scale "$mm")"
+  done < "${TMPDIR:-/tmp}/.appReso.$$"
+  rm -f "${TMPDIR:-/tmp}/.appReso.$$"
+  exit 0
+fi
+
+loose_used=0
+for app in "${apps[@]}"; do
+  if [ "${now:-0}" -eq 1 ]; then
+    row=$(printf 'LIVE\n%s\nPSTAB\n%s\n' "$live" "$snapshot" | awk -v want="$app" '
+      function tomib(s,   u, n) {
+        gsub(/[+-]$/, "", s)              # top marks deltas with a trailing +/-
+        u = substr(s, length(s), 1); n = substr(s, 1, length(s) - 1) + 0
+        if (u == "K") return n / 1024
+        if (u == "M") return n
+        if (u == "G") return n * 1024
+        return (s + 0) / 1048576          # bare bytes
+      }
+      BEGIN { w = tolower(want); strict = w ".app"; mode = "" }
+      $0 == "LIVE"  { mode = "L"; next }
+      $0 == "PSTAB" { mode = "P"; next }
+      # CPU and MEM are the LAST two fields, never fixed positions: top,s
+      # COMMAND column contains spaces ("Arc Helper (GPU"), which shifts every
+      # positional index. Anchoring to NF survives that, and survives a
+      # -stats list with or without the command column.
+      mode == "L" && NF >= 3 { cpu[$1] = $(NF-1) + 0; mem[$1] = tomib($NF); next }
+      mode == "P" && NR > 1 {
+        low = tolower($0); pid = $1 + 0
+        if (!(pid in mem)) next           # died between the two samples
+        if (index(low, strict))   { sn++; scpu += cpu[pid]; smem += mem[pid] }
+        else if (index(low, w))   { ln++; lcpu += cpu[pid]; lmem += mem[pid] }
+      }
+      END {
+        if (sn) printf "%d %.1f %.0f exact", sn, scpu, smem
+        else if (ln) printf "%d %.1f %.0f loose", ln, lcpu, lmem
+        else printf "0 0 0 none"
+      }')
+  else
+  row=$(printf '%s\n' "$snapshot" | awk -v want="$app" '
+    BEGIN { w = tolower(want); strict = w ".app"; }
+    NR > 1 {
+      low = tolower($0)
+      if (index(low, strict)) { sn++; scpu += $2; srss += $3 }
+      else if (index(low, w)) { ln++; lcpu += $2; lrss += $3 }
+    }
+    END {
+      if (sn) printf "%d %.1f %.0f exact", sn, scpu, srss/1024
+      else if (ln) printf "%d %.1f %.0f loose", ln, lcpu, lrss/1024
+      else printf "0 0 0 none"
+    }')
+  fi
+
+  read -r n cpu mb kind <<<"$row"
+  case "$kind" in
+    none)  printf '  %-18s %6s %10s %10s\n' "$app" "-" "-" "not running" ;;
+    loose) loose_used=1
+           printf '  %-18s %6d %10.1f %10s\n' "$app ~" "$n" "$cpu" "$(scale "$mb")" ;;
+    *)     printf '  %-18s %6d %10.1f %10s\n' "$app" "$n" "$cpu" "$(scale "$mb")" ;;
+  esac
+
+  if [ "$verbose" -eq 1 ] && [ "$kind" != none ]; then
+    printf '%s\n' "$snapshot" | awk -v want="$app" '
+      BEGIN { w = tolower(want) }
+      NR > 1 && index(tolower($0), w) {
+        cmd = $4; for (i = 5; i <= NF; i++) cmd = cmd " " $i
+        sub(/^.*\//, "", cmd)
+        printf "        %-7s %6.1f %8.0fMB  %.44s\n", $1, $2, $3/1024, cmd
+      }' | sort -k3 -rn
+  fi
+done
+
+# Column caveats live in -h, not here. Printed on every run they become
+# wallpaper and get skipped; asked for, they get read. The ~ note below is
+# different — it is ACTIONABLE (this row matched loosely, go check it), not a
+# standing caveat, so it stays and prints only when it applies.
+[ "$loose_used" -eq 1 ] && { echo; echo "  ~ = loose substring match (no <name>.app found) — verify with -v."; }
+exit 0

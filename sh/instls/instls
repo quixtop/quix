@@ -1,0 +1,851 @@
+#!/usr/bin/env python3
+# (c) Shrix
+# author: shrix
+"""instls — rebuild the inventory of installed apps / Homebrew / npm / pip /
+pipx items, sorted several ways, as both Markdown and a browsable HTML page.
+
+Usage: instls [-h|--help|help] [-l|--list|list] [-o|--open|open]
+              [-a|--all|all]
+
+  (no args)   rebuild ~/bin/installeds.md and ~/bin/installeds.html
+  -a          include libraries and dependencies too (see below)
+  -l          show what the files hold, then offer to open them
+  -o          open the HTML page in the browser straight away
+  -h          this help
+
+Sections 1-4 list only what you RUN — apps, casks, brew formulae installed on
+request, npm packages shipping a command, pip packages with a console script,
+and pipx tools. The libraries behind them (icu4c, libogg, brotli...) get their
+own section 7, each showing how many things still need it, with genuinely
+unused ones marked "UNUSED - removable" and collected in section 6 for a
+single `brew autoremove`. Pass -a to mix them back into every section.
+
+Orphan detection reads each formula's INSTALL_RECEIPT.json rather than calling
+`brew autoremove --dry-run`: that command needs network and a writable cache,
+and its failure is indistinguishable from a clean "nothing to remove".
+
+Re-running always overwrites both files with a fresh snapshot; the "Last run"
+timestamp at the top reflects the most recent run.
+
+Activity dates come from Spotlight (kMDItemLastUsedDate) when it is running.
+With Spotlight disabled, apps fall back to the newest mtime among their
+preferences / container / Application Support / saved-state files, which
+tracks real use far better than atime does.
+"""
+import atexit
+import html
+import json
+import os
+import plistlib
+import subprocess
+import sys
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+
+MIN_VALID = datetime(1990, 1, 1).timestamp()
+OUT_MD = os.path.expanduser("~/bin/installeds.md")
+OUT_HTML = os.path.expanduser("~/bin/installeds.html")
+HOME = os.path.expanduser("~")
+RUN_ERRORS = []
+SHOW_ALL = False        # -a: include libraries/dependencies in the main lists
+BREW_META = {}          # formula -> (installed_on_request, [runtime deps])
+
+# Trailing gap — one blank line after this script's output, TTY only, so piped
+# or redirected output stays exactly the data. Fires on every exit path.
+atexit.register(lambda: sys.stdout.isatty() and print())
+
+
+def status(kind, msg):
+    """One status line: glyph + colour by outcome, colour only on a TTY."""
+    glyph, colour = {"ok": ("✓", "32"), "fail": ("✗", "31"),
+                     "warn": ("⚠", "33")}[kind]
+    if sys.stdout.isatty():
+        print(f"\033[{colour}m{glyph} {msg}\033[0m")
+    else:
+        print(f"{glyph} {msg}")
+
+
+def run(cmd, timeout=180):
+    """Run a command, returning stdout. Failures return '' but are recorded in
+    RUN_ERRORS, so a missing toolchain stays distinguishable from an empty
+    result — the old version swallowed both identically."""
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        if p.returncode != 0 and p.stderr.strip():
+            first = p.stderr.strip().splitlines()[0]
+            # Most tools already prefix their own name; don't double it up.
+            RUN_ERRORS.append(first if first.startswith(cmd[0] + ":")
+                              else f"{cmd[0]}: {first}")
+        return p.stdout
+    except FileNotFoundError:
+        RUN_ERRORS.append(f"{cmd[0]}: not installed")
+    except Exception as e:
+        RUN_ERRORS.append(f"{cmd[0]}: {type(e).__name__}")
+    return ""
+
+
+def sane(ts):
+    return ts if ts and ts > MIN_VALID else None
+
+
+def stat_times(path):
+    try:
+        st = os.stat(path)
+        birth = getattr(st, "st_birthtime", None) or st.st_ctime
+        return sane(birth), sane(st.st_atime)
+    except OSError:
+        return None, None
+
+
+def mtime(path):
+    try:
+        return sane(os.stat(path).st_mtime)
+    except OSError:
+        return None
+
+
+def du_batch(paths, chunk=150):
+    """One `du -sk` per chunk instead of one per path. Measured 3.4x faster
+    over 20 apps, and this script sizes ~270 items."""
+    sizes = {}
+    for i in range(0, len(paths), chunk):
+        out = run(["du", "-sk"] + paths[i:i + chunk], timeout=300)
+        for line in out.splitlines():
+            parts = line.split("\t", 1)
+            if len(parts) != 2:
+                continue
+            try:
+                sizes[parts[1]] = int(parts[0]) * 1024
+            except ValueError:
+                pass
+    return sizes
+
+
+def parse_md(v):
+    if not v or v == "(null)":
+        return None
+    v = v.strip().strip('"')
+    try:
+        return datetime.strptime(v, "%Y-%m-%d %H:%M:%S %z").timestamp()
+    except ValueError:
+        pass
+    try:
+        return datetime.strptime(v[:19], "%Y-%m-%d %H:%M:%S").replace(
+            tzinfo=timezone.utc).timestamp()
+    except ValueError:
+        return None
+
+
+def spotlight_up():
+    """mdls is useless when the Spotlight server is off — and it fails per-file
+    rather than loudly, so check once up front instead of 270 times."""
+    out = run(["mdutil", "-s", "/"], timeout=20).lower()
+    return "disabled" not in out and "indexing enabled" in out
+
+
+def mdls_dates(paths):
+    """Map path -> (added, used), keyed by the path header mdls emits for each
+    file rather than by output order. Index-based mapping silently shifted
+    every later file onto the wrong dates whenever one attribute was missing."""
+    out = {}
+    CHUNK = 40
+    for i in range(0, len(paths), CHUNK):
+        chunk = paths[i:i + CHUNK]
+        raw = run(["mdls", "-name", "kMDItemDateAdded",
+                   "-name", "kMDItemLastUsedDate"] + chunk)
+        cur, added, used = None, None, None
+        for line in raw.splitlines():
+            s = line.strip()
+            if s.rstrip(":") in chunk:          # per-file path header
+                if cur:
+                    out[cur] = (parse_md(added), parse_md(used))
+                cur, added, used = s.rstrip(":"), None, None
+            elif s.startswith("kMDItemDateAdded"):
+                added = s.split("=", 1)[1].strip()
+            elif s.startswith("kMDItemLastUsedDate"):
+                used = s.split("=", 1)[1].strip()
+        if cur:
+            out[cur] = (parse_md(added), parse_md(used))
+        if len(chunk) == 1 and chunk[0] not in out:   # no header for one path
+            out[chunk[0]] = (parse_md(added), parse_md(used))
+    return out
+
+
+# ── "do you actually run this?" ──────────────────────────────────────────────
+# A cleanup inventory listing icu4c beside iMovie is worse than useless: the
+# library is not separately removable (brew autoremove owns that), so every such
+# row is a decision the reader cannot act on. Each test below asks the packaging
+# system itself rather than guessing from the name.
+
+def brew_receipt(receipt):
+    """-> (installed_on_request, [runtime dependency names]).
+
+    Both facts come from the formula's own INSTALL_RECEIPT.json — local, offline
+    and always readable. `brew autoremove --dry-run` was the previous source and
+    it needs network plus a writable cache: when either is unavailable it fails
+    while the caller reported a confident "no orphaned dependencies". Reading
+    the receipts computes the same answer with nothing left to fail.
+    """
+    try:
+        with open(receipt) as f:
+            d = json.load(f)
+        deps = [x.get("full_name") for x in (d.get("runtime_dependencies") or [])]
+        return bool(d.get("installed_on_request")), [x for x in deps if x]
+    except Exception:
+        # Unreadable receipt: assume requested, so it is never silently swept
+        # into the removable pile on missing evidence.
+        return True, []
+
+
+def npm_has_bin(package_json):
+    """A global npm package with no `bin` entry installs no command."""
+    try:
+        with open(package_json) as f:
+            return bool(json.load(f).get("bin"))
+    except Exception:
+        return False
+
+
+def pip_has_console_script(dist_info):
+    """entry_points.txt declares [console_scripts]; without one the package is
+    an import-only library."""
+    try:
+        with open(os.path.join(dist_info, "entry_points.txt")) as f:
+            return "[console_scripts]" in f.read()
+    except Exception:
+        return False
+
+
+def bundle_id(app_path):
+    try:
+        with open(os.path.join(app_path, "Contents", "Info.plist"), "rb") as f:
+            return plistlib.load(f).get("CFBundleIdentifier")
+    except Exception:
+        return None
+
+
+def app_activity(app_path, name):
+    """Newest mtime across the files an app touches when it runs.
+
+    atime is NOT a usable substitute on macOS: measured 27-Aug-2026, Obsidian
+    had been used that same day while its bundle atime still read 29-Jul. The
+    preference / container / saved-state files below tracked it correctly.
+    """
+    bid = bundle_id(app_path)
+    cands = [os.path.join(HOME, "Library/Application Support", name)]
+    if bid:
+        cands += [
+            os.path.join(HOME, "Library/Preferences", f"{bid}.plist"),
+            os.path.join(HOME, "Library/Containers", bid,
+                         "Data/Library/Preferences", f"{bid}.plist"),
+            os.path.join(HOME, "Library/Saved Application State",
+                         f"{bid}.savedState"),
+            os.path.join(HOME, "Library/Caches", bid),
+        ]
+    times = [t for t in (mtime(c) for c in cands) if t]
+    return max(times) if times else None
+
+
+def fmt(ts):
+    if ts is None:
+        return "unknown"
+    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+
+
+def fmt_size(b):
+    if b is None:
+        return "?"
+    if b == 0:
+        return "0B"
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if b < 1024:
+            return f"{b:.0f}{unit}" if unit == "B" else f"{b:.1f}{unit}"
+        b /= 1024
+    return f"{b:.1f}PB"
+
+
+def block(rows, value_fn, label_extra=None):
+    width = max((len(f"{r[0]} [{r[1]}]") for r in rows), default=20)
+    lines = []
+    for r in rows:
+        label = f"{r[0]} [{r[1]}]"
+        extra = f"  {label_extra(r)}" if label_extra else ""
+        lines.append(f"{label.ljust(width)}  {value_fn(r)}{extra}")
+    return "\n".join(lines)
+
+
+# ── HTML rendering ───────────────────────────────────────────────────────────
+# Monaspace is installed locally (all five variants, verified 27-Aug-2026), so
+# the page keeps its zero-external-request property while still getting a real
+# typeface. Roles: Neon (neo-grotesque) for tabular data, Argon (humanist) for
+# prose, Krypton (mechanical) for the title and nav. Every stack falls back
+# through JetBrains Mono / SF Mono / Menlo so the page survives elsewhere.
+CSS = """
+:root{--bg:#fbfbfa;--fg:#1c1b19;--dim:#6b6862;--line:#e2dfd8;--card:#fff;
+--accent:#8a5a2b;--warn:#a3541f;--chip:#efece5;
+--mono:"Monaspace Neon","JetBrains Mono","SF Mono",ui-monospace,Menlo,monospace;
+--ui:"Monaspace Argon","Monaspace Neon","JetBrains Mono",ui-monospace,Menlo,
+monospace;
+--display:"Monaspace Krypton","Monaspace Neon","JetBrains Mono",ui-monospace,
+monospace}
+@media(prefers-color-scheme:dark){:root{--bg:#16171a;--fg:#e8e6e1;
+--dim:#918d85;--line:#2c2e33;--card:#1d1f23;--accent:#d9a066;--warn:#e0a458;
+--chip:#25272c}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);
+font:14px/1.6 var(--ui);-webkit-font-smoothing:antialiased;
+font-feature-settings:"calt" 1,"liga" 1}
+.wrap{max-width:1180px;margin:0 auto;padding:0 22px 80px}
+header{padding:38px 0 10px}
+h1{font-family:var(--display);font-size:25px;font-weight:600;margin:0 0 6px;
+letter-spacing:-.02em}
+.sub{color:var(--dim);font-size:12.5px;font-variant-numeric:tabular-nums}
+nav{position:sticky;top:0;z-index:10;background:var(--bg);
+border-bottom:1px solid var(--line);padding:10px 0;margin-bottom:26px;
+display:flex;flex-wrap:wrap;gap:6px}
+nav a{font-family:var(--display);font-size:11.5px;letter-spacing:.01em;
+text-decoration:none;color:var(--fg);background:var(--chip);
+border:1px solid var(--line);border-radius:999px;padding:4px 12px;
+white-space:nowrap}
+nav a:hover{border-color:var(--accent);color:var(--accent)}
+section{margin:0 0 42px;scroll-margin-top:66px}
+h2{font-family:var(--display);font-size:16px;font-weight:600;margin:0 0 4px;
+letter-spacing:-.01em}
+.blurb{color:var(--dim);font-size:12.5px;margin:0 0 14px}
+.note{background:var(--card);border:1px solid var(--line);border-left:3px solid
+var(--warn);border-radius:6px;padding:13px 17px;margin:0 0 24px;font-size:12.5px}
+.note strong:first-child{font-family:var(--display);letter-spacing:.01em}
+.note ul{margin:8px 0 0;padding-left:20px}.note li{margin:4px 0}
+.note code{font-family:var(--mono);font-size:11.5px;background:var(--chip);
+border-radius:3px;padding:1px 5px}
+.scroll{overflow-x:auto;border:1px solid var(--line);border-radius:8px;
+background:var(--card)}
+table{border-collapse:collapse;width:100%;font-size:12.5px}
+th{font-family:var(--display);text-align:left;font-weight:600;color:var(--dim);
+font-size:10.5px;text-transform:uppercase;letter-spacing:.07em;padding:9px 14px;
+border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--card)}
+td{padding:5px 14px;border-bottom:1px solid var(--line)}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:var(--chip)}
+td.v,td.s{font-family:var(--mono);font-size:12px;color:var(--dim);
+white-space:nowrap;font-variant-numeric:tabular-nums}
+td.s{text-align:right}
+.kind{font-family:var(--mono);font-size:10.5px;color:var(--dim);
+background:var(--chip);border-radius:4px;padding:1px 6px}
+.flag{font-family:var(--display);color:var(--warn);font-size:10.5px;
+font-weight:700;letter-spacing:.04em}
+pre{margin:0;padding:14px;font-family:var(--mono);font-size:12px;
+white-space:pre-wrap}
+.empty{color:var(--dim);font-size:12.5px;font-style:italic}
+.top{display:inline-block;margin-top:10px;font-family:var(--display);
+font-size:11px;color:var(--dim);text-decoration:none}
+.top:hover{color:var(--accent)}
+"""
+
+
+def h(s):
+    return html.escape(str(s), quote=False)
+
+
+def html_table(rows, value_header, value_fn, extra_fn=None):
+    out = ['<div class="scroll"><table><thead><tr>',
+           '<th>Item</th><th>Kind</th>', f'<th>{h(value_header)}</th>']
+    if extra_fn:
+        out.append('<th></th>')
+    out.append('</tr></thead><tbody>')
+    cls = "s" if value_header.lower() == "size" else "v"
+    for r in rows:
+        out.append(f'<tr><td>{h(r[0])}</td>'
+                   f'<td><span class="kind">{h(r[1])}</span></td>'
+                   f'<td class="{cls}">{h(value_fn(r))}</td>')
+        if extra_fn:
+            e = extra_fn(r)
+            out.append(f'<td class="flag">{h(e)}</td>' if e else '<td></td>')
+        out.append('</tr>')
+    out.append('</tbody></table></div>')
+    return "".join(out)
+
+
+def write_html(path, last_run, headline, quality, guidance, sections):
+    nav = "".join(f'<a href="#{s["id"]}">{h(s["nav"])}</a>' for s in sections)
+    parts = [
+        '<meta charset="utf-8">',
+        '<meta name="viewport" content="width=device-width,initial-scale=1">',
+        '<title>Installed Items Inventory</title>',
+        f'<style>{CSS}</style>',
+        '<div class="wrap">',
+        '<header><h1>Installed Items Inventory</h1>',
+        f'<div class="sub">{h(headline)} &middot; last run {h(last_run)}</div>',
+        '</header>',
+        f'<nav>{nav}</nav>',
+        '<div class="note"><strong>Data quality</strong><ul>',
+        "".join(f"<li>{q}</li>" for q in quality),
+        '</ul></div>',
+        '<div class="note"><strong>Before you delete anything</strong><ul>',
+        "".join(f"<li>{g}</li>" for g in guidance),
+        '</ul></div>',
+    ]
+    for s in sections:
+        parts.append(f'<section id="{s["id"]}"><h2>{h(s["title"])}</h2>')
+        parts.append(f'<p class="blurb">{s["blurb"]}</p>')
+        parts.append(s["html"])
+        parts.append('<a class="top" href="#">&uarr; top</a></section>')
+    parts.append('</div>')
+    with open(path, "w") as f:
+        f.write("<!doctype html><html lang=\"en\">" + "".join(parts) + "</html>")
+
+
+def open_html():
+    if not os.path.exists(OUT_HTML):
+        status("warn", f"no page yet — run `instls` to build {OUT_HTML}")
+        return 1
+    subprocess.run(["open", OUT_HTML])
+    return 0
+
+
+def show_file():
+    """-l : summarise what was written, then offer to open it."""
+    if not os.path.exists(OUT_MD):
+        status("warn", f"no inventory yet — run `instls` to build {OUT_MD}")
+        return 1
+
+    with open(OUT_MD) as f:
+        lines = f.read().splitlines()
+    last_run = lines[0].replace("Last run:", "").strip() if lines else "unknown"
+    summary = next((l for l in lines[:6] if "items across" in l), "")
+    sections = [l.lstrip("# ").strip() for l in lines if l.startswith("## ")]
+
+    print(f"  markdown  {OUT_MD}  "
+          f"({fmt_size(os.path.getsize(OUT_MD))}, {len(lines)} lines)")
+    if os.path.exists(OUT_HTML):
+        print(f"  html      {OUT_HTML}  "
+              f"({fmt_size(os.path.getsize(OUT_HTML))})")
+    print(f"  last run  {last_run}")
+    if summary:
+        # Split on the sentence, not on "." — the headline carries a decimal
+        # size ("33.9GB") that a bare "." split truncates mid-number.
+        print(f"  contents  {summary.split('. Re-running')[0]}")
+    if sections:
+        print("  sections")
+        for s in sections:
+            # Most titles already start with their own number; don't add another.
+            print(f"     {s}" if s[0].isdigit() else f"     · {s}")
+
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return 0
+    try:
+        ans = input("\n  open  [b]rowser / [v]i / [N]o? ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return 0
+    if ans in ("b", "browser", "y", "yes"):
+        return open_html()
+    if ans in ("v", "vi"):
+        subprocess.run([os.environ.get("EDITOR", "vi"), OUT_MD])
+    return 0
+
+
+def build():
+    # item: name, kind, path, installed, used, size_bytes
+    items = []
+
+    # ---------- macOS applications ----------
+    APP_DIRS = ["/Applications", "/Applications/Utilities",
+                os.path.expanduser("~/Applications")]
+    app_paths = []
+    for d in APP_DIRS:
+        if not os.path.isdir(d):
+            continue
+        for entry in sorted(os.listdir(d)):
+            p = os.path.join(d, entry)
+            if entry.endswith(".app"):
+                app_paths.append((entry[:-4], p))
+            elif os.path.isdir(p) and d == "/Applications" and entry != "Utilities":
+                for sub in sorted(os.listdir(p)):
+                    if sub.endswith(".app"):
+                        app_paths.append((f"{entry}/{sub[:-4]}",
+                                          os.path.join(p, sub)))
+
+    have_spotlight = spotlight_up()
+    md = mdls_dates([p for _, p in app_paths]) if have_spotlight else {}
+
+    for name, p in app_paths:
+        added, used = md.get(p, (None, None))
+        birth, _atime = stat_times(p)
+        candidates = [t for t in (added, birth) if t]
+        # Spotlight first; otherwise the mtime probe. atime is deliberately NOT
+        # a fallback for apps — it is stale by weeks here (see app_activity).
+        items.append([name, "app", p, min(candidates) if candidates else None,
+                      used or app_activity(p, name), None, True])
+
+    # ---------- Homebrew ----------
+    brew_prefix = run(["brew", "--prefix"]).strip()
+    if brew_prefix:
+        for root, kind in ((os.path.join(brew_prefix, "Cellar"), "brew"),
+                           (os.path.join(brew_prefix, "Caskroom"), "cask")):
+            if not os.path.isdir(root):
+                continue
+            for name in sorted(os.listdir(root)):
+                p = os.path.join(root, name)
+                if not os.path.isdir(p) or name.startswith("."):
+                    continue
+                try:
+                    vers = [os.path.join(p, v) for v in os.listdir(p)
+                            if os.path.isdir(os.path.join(p, v))]
+                except OSError:
+                    vers = []
+                target = max(vers, key=lambda x: os.stat(x).st_mtime) if vers else p
+                receipt = os.path.join(target, "INSTALL_RECEIPT.json")
+                b, a = stat_times(receipt if os.path.exists(receipt) else target)
+                req, deps = brew_receipt(receipt)
+                if kind == "brew":
+                    BREW_META[name] = (req, deps)
+                # A cask installs an app; a formula counts only if requested.
+                items.append([name, kind, target, b, a, None,
+                              kind == "cask" or req])
+
+    # ---------- npm globals ----------
+    npm_root = run(["npm", "root", "-g"]).strip()
+    if npm_root and os.path.isdir(npm_root):
+        entries = []
+        for e in sorted(os.listdir(npm_root)):
+            if e.startswith("."):
+                continue
+            p = os.path.join(npm_root, e)
+            if e.startswith("@") and os.path.isdir(p):
+                for sub in sorted(os.listdir(p)):
+                    entries.append((f"{e}/{sub}", os.path.join(p, sub)))
+            elif os.path.isdir(p):
+                entries.append((e, p))
+        for name, p in entries:
+            pj = os.path.join(p, "package.json")
+            b, a = stat_times(pj if os.path.exists(pj) else p)
+            items.append([name, "npm", p, b, a, None, npm_has_bin(pj)])
+
+    # ---------- pip ----------
+    site_dirs = set()
+    raw = run(["python3", "-c",
+               "import site;print('\\n'.join(site.getsitepackages()))"])
+    site_dirs.update(l.strip() for l in raw.splitlines() if l.strip())
+    raw = run(["python3", "-c", "import site;print(site.getusersitepackages())"])
+    site_dirs.update(l.strip() for l in raw.splitlines() if l.strip())
+    seen_pip = set()
+    for sd in sorted(site_dirs):
+        if not os.path.isdir(sd):
+            continue
+        for e in sorted(os.listdir(sd)):
+            if not (e.endswith(".dist-info") or e.endswith(".egg-info")):
+                continue
+            base = e.rsplit(".", 1)[0]
+            if base in seen_pip:
+                continue
+            seen_pip.add(base)
+            p = os.path.join(sd, e)
+            b, a = stat_times(p)
+            items.append([base, "pip", p, b, a, None,
+                          pip_has_console_script(p)])
+
+    # ---------- pipx ----------
+    pipx_home = os.path.expanduser("~/.local/pipx/venvs")
+    if os.path.isdir(pipx_home):
+        for e in sorted(os.listdir(pipx_home)):
+            p = os.path.join(pipx_home, e)
+            if os.path.isdir(p):
+                b, a = stat_times(p)
+                items.append([e, "pipx", p, b, a, None, True])
+
+    # ---------- orphan detection, computed locally from the receipts ----------
+    # A formula is removable when nothing installed depends on it AND you never
+    # asked for it directly. That is brew autoremove's rule, evaluated here so
+    # it cannot silently fail.
+    dependents = {}
+    for name, (_req, deps) in BREW_META.items():
+        for d in deps:
+            dependents.setdefault(d.split("/")[-1], set()).add(name)
+    orphans = {n for n, (req, _d) in BREW_META.items()
+               if not req and not dependents.get(n)}
+
+    # ---------- split: things you run vs. what supports them ----------
+    # Support rows are NOT discarded — they get their own section, because an
+    # unused library is exactly what the reader wants to find and remove.
+    support = [it for it in items if not it[6]]
+    if not SHOW_ALL:
+        items = [it for it in items if it[6]]
+
+    # ---------- sizes, batched rather than one du per item ----------
+    sizes = du_batch([it[2] for it in items] + [it[2] for it in support])
+    for it in items + support:
+        it[5] = sizes.get(it[2])
+
+    # ---------- risk signals ----------
+    def gatekeeper(it):
+        """-> ('flagged' | 'ok' | 'unknown', item).
+
+        A check that could not RUN must never read as a clean pass. spctl
+        returns "internal error in Code Signing subsystem" under a sandbox and
+        on some unreadable bundles; treating that as success made the report
+        claim every app passed when not one had been examined.
+        """
+        try:
+            p = subprocess.run(["spctl", "-a", "-vv", it[2]],
+                               capture_output=True, text=True, timeout=20)
+        except Exception:
+            return ("unknown", it)
+        blob = (p.stdout + p.stderr).lower()
+        if "rejected" in blob or "no usable signature" in blob:
+            return ("flagged", it)
+        if "accepted" in blob:
+            return ("ok", it)
+        return ("unknown", it)
+
+    scannable = [it for it in items if it[1] in ("app", "cask")]
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        verdicts = list(pool.map(gatekeeper, scannable))
+    unsigned = [it for v, it in verdicts if v == "flagged"]
+    unchecked = [it for v, it in verdicts if v == "unknown"]
+
+    autoremove_names = orphans
+
+    # ---------- orderings ----------
+    known_inst = sorted([i for i in items if i[3]], key=lambda x: x[3],
+                        reverse=True)
+    inst_all = known_inst + [i for i in items if not i[3]]
+    known_used = [i for i in items if i[4]]
+    used_newest = sorted(known_used, key=lambda x: x[4], reverse=True)
+    used_oldest = (sorted(known_used, key=lambda x: x[4])
+                   + [i for i in items if not i[4]])
+    size_sorted = sorted([i for i in items if i[5]], key=lambda x: x[5],
+                         reverse=True)
+
+    total_size = sum(i[5] or 0 for i in items)
+    trash = os.path.expanduser("~/.Trash")
+    trash_size = du_batch([trash]).get(trash)
+
+    # ---------- shared prose ----------
+    if have_spotlight:
+        quality = ["Spotlight is running, so last-used dates come from "
+                   "<code>kMDItemLastUsedDate</code> — the most accurate "
+                   "source."]
+    else:
+        quality = [
+            "<strong>Spotlight is disabled on this machine</strong>, so "
+            "<code>mdls</code> returns nothing. App activity is inferred from "
+            "the newest mtime among each app's preferences, container, "
+            "Application Support and saved-state files.",
+            "That proxy is good enough to RANK apps, but it is not a launch "
+            "record — read a date as &ldquo;around then&rdquo;, not exact.",
+            "Homebrew/npm/pip rows still use atime, which macOS updates "
+            "lazily; those dates skew old.",
+        ]
+    if support and not SHOW_ALL:
+        quality.append(
+            f"Sections 1&ndash;4 list only things you RUN. The {len(support)} "
+            "libraries and dependencies behind them are in section 7, with the "
+            "unused ones marked. <code>instls -a</code> mixes them back into "
+            "every section.")
+    quality.append(
+        "Orphan detection reads each formula's <code>INSTALL_RECEIPT.json</code> "
+        "directly, not <code>brew autoremove</code> — that command needs network "
+        "and a writable cache, and reported “nothing orphaned” whenever "
+        "it failed.")
+    if RUN_ERRORS:
+        quality.append("Tools that did not report cleanly: "
+                       + h("; ".join(sorted(set(RUN_ERRORS))[:6])))
+
+    trash_line = (f"Current <code>~/.Trash</code> size: "
+                  f"<strong>{fmt_size(trash_size)}</strong>." if trash_size
+                  else "Couldn't read <code>~/.Trash</code> size (Terminal "
+                       "needs Full Disk Access under System Settings &gt; "
+                       "Privacy &amp; Security) — check via Finder instead.")
+    guidance = [
+        "<strong>macOS apps</strong>: don't <code>rm -rf</code> an "
+        "<code>.app</code> — drag it to Trash (or <code>trash &lt;path&gt;"
+        "</code>). It stays recoverable in <code>~/.Trash</code> until you "
+        "empty it.",
+        "<strong>Check the bin first</strong>: <code>ls -la ~/.Trash</code> "
+        "before emptying. " + trash_line,
+        "<strong>Homebrew</strong>: <code>brew uninstall &lt;name&gt;</code> "
+        "or <code>brew uninstall --cask &lt;name&gt;</code> — never delete "
+        "from <code>Cellar</code>/<code>Caskroom</code> by hand.",
+        "<strong>npm globals</strong>: <code>npm uninstall -g &lt;name&gt;"
+        "</code>. &nbsp;<strong>pip</strong>: <code>pip3 uninstall "
+        "&lt;name&gt;</code>.",
+        f"Total measured footprint of items here: "
+        f"<strong>{fmt_size(total_size)}</strong>.",
+    ]
+
+    never = lambda r: "NEVER USED" if not r[4] else ""
+    sections = [
+        dict(id="installed", nav="Install date",
+             title="1. Sorted by install date (newest first)",
+             blurb="Use this to spot what changed recently.",
+             md=block(inst_all, lambda r: fmt(r[3])),
+             html=html_table(inst_all, "Installed", lambda r: fmt(r[3]))),
+        dict(id="active", nav="Recently used",
+             title="2. Sorted by last used (newest first)",
+             blurb="Use this to see what's actively in rotation.",
+             md=block(used_newest, lambda r: fmt(r[4])),
+             html=html_table(used_newest, "Last used", lambda r: fmt(r[4]))),
+        dict(id="stale", nav="Stale / never used",
+             title="3. Sorted by last used (oldest / never-used first)",
+             blurb="<strong>Your best deletion candidates</strong> — installed "
+                   "but stale or never opened. Read the data-quality note "
+                   "above before acting on a date.",
+             md=block(used_oldest, lambda r: fmt(r[4]), label_extra=never),
+             html=html_table(used_oldest, "Last used", lambda r: fmt(r[4]),
+                             extra_fn=never)),
+        dict(id="size", nav="Disk size",
+             title="4. Sorted by disk size (largest first)",
+             blurb="Cross-reference with section 3 — large + unused is the "
+                   "strongest signal to remove something.",
+             md=block(size_sorted, lambda r: fmt_size(r[5])),
+             html=html_table(size_sorted, "Size", lambda r: fmt_size(r[5]))),
+    ]
+
+    if unsigned:
+        sections.append(dict(
+            id="unsigned", nav="Unsigned",
+            title="5. Unsigned / Gatekeeper-flagged apps",
+            blurb="These failed a Gatekeeper signature check — verify the "
+                  "source before keeping them.",
+            md=block(unsigned, lambda r: r[2]),
+            html=html_table(unsigned, "Path", lambda r: r[2])))
+    elif unchecked and not [v for v, _ in verdicts if v == "ok"]:
+        # Nothing was actually examined — say so rather than implying a pass.
+        sections.append(dict(
+            id="unsigned", nav="Unsigned",
+            title="5. Unsigned / Gatekeeper-flagged apps",
+            blurb=f"<strong>Not checked.</strong> Gatekeeper could not examine "
+                  f"any of the {len(unchecked)} apps/casks — spctl errored on "
+                  f"every one. This is NOT a clean result.",
+            md=f"NOT CHECKED — spctl errored on all {len(unchecked)} "
+               "apps/casks, so nothing was examined. Re-run outside any "
+               "sandbox to get a real answer.",
+            html=f'<p class="empty">Not checked — spctl errored on all '
+                 f'{len(unchecked)} apps/casks.</p>'))
+    else:
+        note = (f" ({len(unchecked)} could not be checked)" if unchecked else "")
+        sections.append(dict(
+            id="unsigned", nav="Unsigned",
+            title="5. Unsigned / Gatekeeper-flagged apps",
+            blurb=f"Every app and cask that could be examined passed "
+                  f"Gatekeeper{note}.",
+            md=f"None found — all checked apps/casks passed Gatekeeper's "
+               f"signature check{note}.",
+            html=f'<p class="empty">None found{note}.</p>'))
+
+    if autoremove_names:
+        listing = "\n".join(sorted(autoremove_names))
+        sections.append(dict(
+            id="orphans", nav="Brew orphans",
+            title="6. Homebrew orphaned dependencies",
+            blurb="Installed only as a dependency of something else, and now "
+                  "nothing needs them. Remove them all with "
+                  "<code>brew autoremove</code>.",
+            md=listing,
+            html=f'<div class="scroll"><pre>{h(listing)}</pre></div>'))
+    else:
+        sections.append(dict(
+            id="orphans", nav="Brew orphans",
+            title="6. Homebrew orphaned dependencies",
+            blurb="Nothing orphaned — every dependency still has something "
+                  "that needs it.",
+            md="None — every installed dependency is still required by "
+               "something.",
+            html='<p class="empty">None — every dependency is still needed.</p>'))
+
+    # ---- 7. supporting libraries, with the unused ones surfaced first -------
+    if support:
+        def why(r):
+            if r[1] != "brew":
+                return "no command"          # npm/pip package exposing nothing
+            if r[0] in orphans:
+                return "UNUSED — removable"
+            n = len(dependents.get(r[0], ()))
+            return f"needed by {n}" if n else "kept on request"
+
+        # Removable first, then biggest — the reader is here to reclaim space.
+        support.sort(key=lambda r: (r[0] not in orphans, -(r[5] or 0)))
+        n_orph = sum(1 for r in support if r[0] in orphans)
+        head = (f"{len(support)} items you never run directly. "
+                + (f"<strong>{n_orph} are unused and removable</strong> — see "
+                   "section 6 for the one-command sweep."
+                   if n_orph else
+                   "Every one is still required by something you do run."))
+        sections.append(dict(
+            id="support", nav="Support libs",
+            title="7. Supporting libraries (not run directly)",
+            blurb=head,
+            md=block(support, why, label_extra=lambda r: fmt_size(r[5])),
+            html=html_table(support, "Status", why,
+                            extra_fn=lambda r: fmt_size(r[5]))))
+
+    last_run = datetime.now().strftime("%Y-%m-%d %H:%M")
+    headline = (f"{len(items)} items across apps, Homebrew, npm, pip, pipx "
+                f"&middot; {fmt_size(total_size)}")
+
+    # ---------- write markdown ----------
+    os.makedirs(os.path.dirname(OUT_MD), exist_ok=True)
+    strip = lambda s: (s.replace("<strong>", "**").replace("</strong>", "**")
+                        .replace("<code>", "`").replace("</code>", "`")
+                        .replace("&lt;", "<").replace("&gt;", ">")
+                        .replace("&amp;", "&").replace("&ldquo;", '"')
+                        .replace("&rdquo;", '"').replace("&nbsp;", " ")
+                        .replace("&middot;", "·"))
+    with open(OUT_MD, "w") as f:
+        f.write(f"Last run: {last_run}\n")
+        f.write("# Installed Items Inventory\n")
+        f.write(f"{strip(headline)}. Re-running `instls` overwrites this file "
+                "with a fresh snapshot.\n")
+        f.write("Each section below is the SAME item list, sorted a different "
+                "way to surface a different kind of problem.\n\n")
+        f.write("## Data quality\n")
+        for q in quality:
+            f.write(f"- {strip(q)}\n")
+        f.write("\n## Before you delete anything\n")
+        for g in guidance:
+            f.write(f"- {strip(g)}\n")
+        f.write("\n")
+        for s in sections:
+            f.write(f"## {s['title']}\n{strip(s['blurb'])}\n\n```\n")
+            f.write(s["md"])
+            f.write("\n```\n\n")
+
+    # ---------- write html ----------
+    write_html(OUT_HTML, last_run, strip(headline), quality, guidance, sections)
+
+    # "0 unsigned" would be a lie when nothing could be scanned — report the
+    # unchecked count instead, so the line never over-reassures.
+    sig = (f"{len(unsigned)} unsigned" if not unchecked
+           else f"{len(unchecked)} unchecked")
+    detail = f"{len(items)} items, {sig}, {len(autoremove_names)} orphaned"
+    tail = "instls -l · instls -o"
+    if have_spotlight:
+        status("ok", f"wrote installeds.md + .html — {detail} · {tail}")
+    else:
+        status("warn", f"wrote installeds.md + .html — {detail}; Spotlight "
+                       f"off, dates inferred · {tail}")
+    return 0
+
+
+def main():
+    global SHOW_ALL
+    arg = sys.argv[1] if len(sys.argv) > 1 else ""
+    if arg in ("-h", "--help", "help"):
+        print(__doc__.strip())
+        return 0
+    if arg in ("-l", "--list", "list"):
+        return show_file()
+    if arg in ("-o", "--open", "open"):
+        return open_html()
+    if arg in ("-a", "--all", "all"):
+        SHOW_ALL = True
+        return build()
+    if arg:
+        status("fail", f"unknown option: {arg} (try -h)")
+        return 64
+    return build()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

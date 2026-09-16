@@ -1,0 +1,794 @@
+#!/usr/bin/env bash
+# (c) Shrix
+# author: shrix
+# cc-xtn — Claude Code extensions manager
+#
+# Subcommands:
+#   enable <name> [<name>...]   enable one or more extensions (auto-detects category)
+#   disable <name> [<name>...]  disable one or more extensions (auto-detects category)
+#   status <name>     show current state + category for a name
+#   list [--enabled|--disabled]
+#                     enumerate all toggleable extensions, grouped by category
+#   --enabled         shortcut for `list --enabled`
+#   --disabled        shortcut for `list --disabled`
+#   help              show usage
+#
+# Categories (each has its own toggle mechanism):
+#   plugin   — settings.json enabledPlugins[X] = true|false
+#   skill    — ~/.agents/skills/<X>/  ↔  ~/.agents/disabled-skills/<X>/
+#   command  — ~/.claude/commands/<X>.md  ↔  ~/.claude/disabled-commands/<X>.md
+#   agent    — ~/.claude/agents/<X>.md  ↔  ~/.claude/disabled-agents/<X>.md
+#   mcp      — ~/.claude.json mcpServers[X]  ↔  mcpServersDisabled[X]
+#   hook     — settings.json hooks[<event>][matcher==X]  ↔  hooksDisabled[<event>][...]
+#              named as <event>:<matcher>, e.g. PreToolUse:Bash or Stop:
+
+set -euo pipefail
+
+# Trailing gap — one blank line after this script's output, TTY only, so piped
+# or redirected output stays exactly the data. Fires on every exit path.
+_gap() { [ -t 1 ] && printf '\n'; return 0; }
+trap _gap EXIT
+
+SETTINGS=~/.claude/settings.json
+SETTINGS_BAK=~/.claude/settings.json.bak
+# MCP servers live in ~/.claude.json, NOT settings.json — Claude Code reads
+# .mcpServers only from there. Pointing MCP at settings.json makes `list` show
+# none and makes enable/disable a no-op against a key nothing reads.
+MCPCONF=~/.claude.json
+
+# Emoji glyphs carry intrinsic color — render colored in TTYs, code blocks, and
+# UI surfaces (CC slash command output) where ANSI escapes are stripped.
+readonly OK="✅"
+readonly NO="❌"
+# Dim grey only applies to the [N tokens] size label; ANSI works in TTYs only.
+if [ -t 1 ]; then
+  readonly GRAY=$'\033[90m'
+  readonly RESET=$'\033[0m'
+else
+  readonly GRAY=""
+  readonly RESET=""
+fi
+
+# Estimate token count from byte count (English-text approximation: ~4 bytes/token).
+# Compact format: <1024 → as-is, <1M → "NK", >=1M → "NM" (rounded; no decimals/commas).
+format_tokens() {
+  awk -v b="$1" 'BEGIN {
+    t = int(b / 4)
+    if (t < 1024) {
+      print t
+    } else if (t < 1048576) {
+      printf "%dK\n", int(t / 1024 + 0.5)
+    } else {
+      printf "%dM\n", int(t / 1048576 + 0.5)
+    }
+  }'
+}
+
+# Bytes of PROMPT TEXT under a path — the only thing that can enter context.
+# Measuring disk (du) instead counts .git objects, .pyc, images and binaries:
+# that reported 37M "tokens" for the skills tree whose real text is ~505K, and
+# no context figure can exceed the window at all. -L follows symlinks, since
+# both ~/.agents and ~/.claude are full of them.
+text_bytes() {
+  find -L "$@" -type f \( -name '*.md' -o -name '*.txt' \) -exec cat {} + 2>/dev/null \
+    | wc -c | tr -d ' '
+}
+
+# Format: " [N tok if invoked]" in dim grey. Empty if path doesn't exist.
+# "if invoked" is load-bearing: skill/command BODIES cost nothing per turn —
+# only their descriptions are always-loaded. See always_loaded_line().
+size_label() {
+  local path="$1"
+  [ -e "$path" ] || return 0
+  local bytes
+  bytes=$(text_bytes "$path")
+  if [ -z "$bytes" ] || [ "$bytes" -eq 0 ]; then return 0; fi
+  printf " %s[%s tok if invoked]%s" "$GRAY" "$(format_tokens "$bytes")" "$RESET"
+}
+
+# Wrap a name in a markdown file:// link in non-TTY (slash-command) mode.
+# - TTY: returns plain name (no link literals leak into terminal output)
+# - Non-TTY: returns [name](file:///<target>) where target prefers SKILL.md if dir contains one
+# - Empty/missing path: returns plain name (no broken links)
+link_wrap() {
+  local name="$1"
+  local path="$2"
+  if [ -t 1 ] || [ -z "$path" ]; then
+    printf "%s" "$name"
+    return
+  fi
+  # Strip any trailing slash so we don't emit foo//SKILL.md
+  local clean="${path%/}"
+  local target="$clean"
+  if [ -d "$clean" ] && [ -f "$clean/SKILL.md" ]; then
+    target="$clean/SKILL.md"
+  fi
+  if [ ! -e "$target" ]; then
+    printf "%s" "$name"
+    return
+  fi
+  printf "[%s](file://%s)" "$name" "$target"
+}
+
+# Combined token estimate across multiple paths (skips missing)
+size_label_total() {
+  local paths=()
+  local p
+  for p in "$@"; do
+    [ -e "$p" ] && paths+=("$p")
+  done
+  if [ ${#paths[@]} -eq 0 ]; then return 0; fi
+  local bytes
+  bytes=$(text_bytes "${paths[@]}")
+  if [ -z "$bytes" ] || [ "$bytes" -eq 0 ]; then return 0; fi
+  printf " %s[%s tok if invoked]%s" "$GRAY" "$(format_tokens "$bytes")" "$RESET"
+}
+
+# Always-loaded context. Unlike skills/commands — whose BODIES load only when
+# invoked — every rules/*.md and CLAUDE.md sits in context on EVERY turn, so
+# this is the cost that actually recurs. A rule carrying `paths:` frontmatter
+# loads only when a matching file is touched; without it the rule is always-on.
+RULES_DIR=~/.claude/rules
+GLOBAL_MD=~/.claude/CLAUDE.md
+
+always_loaded_line() {
+  [ -d "$RULES_DIR" ] || return 0
+  local total all scoped
+  total=$(cat "$RULES_DIR"/*.md "$GLOBAL_MD" 2>/dev/null | wc -c | tr -d ' ')
+  if [ -z "$total" ] || [ "$total" -eq 0 ]; then return 0; fi
+  all=$(find "$RULES_DIR" -name '*.md' 2>/dev/null | wc -l | tr -d ' ')
+  # `|| true` for the same reason as list_entries: zero path-scoped rules is a
+  # legitimate result, but grep exits 1 on no match and pipefail would abort.
+  scoped=$(grep -l '^paths:' "$RULES_DIR"/*.md 2>/dev/null | wc -l | tr -d ' ' || true)
+  printf "Always-loaded:  %s rules + CLAUDE.md %s[%s tokens]%s  |  path-scoped %s  |  always-on %s\n" \
+    "$all" "$GRAY" "$(format_tokens "$total")" "$RESET" "$scoped" "$((all - scoped))"
+}
+
+# (category, kind, enabled_path, disabled_path) — `kind` is "dir" for skills,
+# "file" for commands and agents (both use .md files).
+SKILL_DIR=~/.agents/skills
+SKILL_DISABLED=~/.agents/disabled-skills
+# Where the CONVENTION exposes a skill to Claude Code: skills live in
+# ~/.agents/skills/<X>/ and are surfaced as ~/.claude/skills/<X> symlinks. A
+# disable that moves only the directory leaves a DANGLING link behind; an
+# enable leaves the skill invisible. sync_skill_link() keeps the pair in step.
+SKILL_LINK_DIR=~/.claude/skills
+CMD_DIR=~/.claude/commands
+CMD_DISABLED=~/.claude/disabled-commands
+AGENT_DIR=~/.claude/agents
+AGENT_DISABLED=~/.claude/disabled-agents
+
+#------------------------------------------------------------------------------
+# Utilities
+#------------------------------------------------------------------------------
+
+die() { echo "cc-xtn: $*" >&2; exit 1; }
+
+# Atomic JSON edit with .bak backup. Reads → applies jq filter → validates →
+# atomic-renames into place. The .bak preserves the prior good state.
+json_edit() {
+  local file="$1"; shift
+  local tmp; tmp=$(mktemp)
+  jq "$@" "$file" > "$tmp" 2>/dev/null || { rm -f "$tmp"; die "jq filter failed"; }
+  jq -e . "$tmp" >/dev/null || { rm -f "$tmp"; die "post-edit JSON invalid"; }
+  # Back up NEXT TO the edited file. A hardcoded settings.json.bak would be
+  # wrong the moment a second config (~/.claude.json, for MCP) is edited — it
+  # would overwrite the settings backup with the other file's contents.
+  cp "$file" "$file.bak"
+  mv "$tmp" "$file"
+}
+
+# List entries in a dir (silent on missing dir) optionally trimming a suffix.
+# Used by both file-based and dir-based categories.
+list_entries() {
+  local dir="$1" suffix="${2:-}"
+  [ -d "$dir" ] || return 0
+  # `|| true`: an EMPTY dir is a legitimate result, not an error. Without it
+  # grep exits 1 on no match, pipefail propagates, and `set -e` kills the whole
+  # run — which silently truncated `list` before its Summary whenever a
+  # category dir (e.g. agents/) was empty.
+  if [ -n "$suffix" ]; then
+    /bin/ls -1 "$dir" 2>/dev/null | grep "${suffix}\$" | sed "s/${suffix}\$//" || true
+  else
+    /bin/ls -1 "$dir" 2>/dev/null | grep -v '^_' || true
+  fi
+}
+
+count_entries() {
+  list_entries "$@" | wc -l | tr -d ' '
+}
+
+# Generic file/dir toggle. Pattern shared by skill (kind=dir), command (kind=file
+# with .md), and agent (kind=file with .md).
+fs_state() {
+  local kind="$1" enabled_path="$2" disabled_path="$3" name="$4"
+  local suffix=""
+  [ "$kind" = "file" ] && suffix=".md"
+  if [ -e "${enabled_path}/${name}${suffix}" ]; then echo "true"
+  elif [ -e "${disabled_path}/${name}${suffix}" ]; then echo "false"
+  else echo "missing"
+  fi
+}
+
+# Keep ~/.claude/skills/<name> in step with a skill's enabled/disabled state.
+# Skills ONLY — commands and agents live directly under ~/.claude and have no
+# link layer.
+#
+# ⚠️ Removes a SYMLINK and nothing else. ~/.claude/skills/ also holds real
+# directories (browser-harness, browserclaw, cloudflare, graphify, here-now)
+# that are not part of the ~/.agents convention; deleting one would destroy the
+# skill itself. `-L` is what makes that safe, and is also the only test that
+# sees an already-dangling link — `-e` follows the link and reports it absent.
+sync_skill_link() {
+  local action="$1" name="$2"
+  local link="${SKILL_LINK_DIR}/${name}"
+  if [ "$action" = "enable" ]; then
+    if [ -L "$link" ]; then
+      return 0                      # link already there (possibly dangling) — mv fixed it
+    elif [ -e "$link" ]; then
+      echo "  note: $link is a real directory, not a convention symlink — left alone."
+      return 0
+    fi
+    # Relative, matching every other link in the dir: ~/.claude/skills/<X> ->
+    # ../../.agents/skills/<X>. An absolute link would break if HOME moves.
+    ln -s "../../.agents/skills/${name}" "$link" \
+      && echo "  linked $link -> ../../.agents/skills/${name}"
+  else
+    if [ -L "$link" ]; then
+      rm "$link" && echo "  unlinked $link"
+    elif [ -e "$link" ]; then
+      echo "  note: $link is a real directory, not a convention symlink — left alone."
+    fi
+  fi
+}
+
+fs_toggle() {
+  local action="$1" kind="$2" enabled_path="$3" disabled_path="$4"
+  local category="$5" name="$6"
+  local suffix=""
+  [ "$kind" = "file" ] && suffix=".md"
+  local src="" dst="" enabled_dir_label=""
+  if [ "$action" = "enable" ]; then
+    src="${disabled_path}/${name}${suffix}"
+    dst="${enabled_path}/${name}${suffix}"
+    enabled_dir_label="enabled"
+  else
+    src="${enabled_path}/${name}${suffix}"
+    dst="${disabled_path}/${name}${suffix}"
+    enabled_dir_label="disabled"
+  fi
+  if [ -e "$dst" ]; then
+    echo "  $category '$name' is already $enabled_dir_label — no change."
+    return 0
+  fi
+  [ -e "$src" ] || die "$category '$name' not found in either dir"
+  mkdir -p "$(dirname "$dst")"
+  mv "$src" "$dst" || die "$category '$name': move refused ($src → $dst)"
+  [ "$category" = "skill" ] && sync_skill_link "$action" "$name"
+  echo "  $category '$name' → $enabled_dir_label"
+  echo "  RESTART REQUIRED for change to take effect."
+}
+
+#------------------------------------------------------------------------------
+# Per-category state checkers
+#------------------------------------------------------------------------------
+
+plugin_state() {
+  # Use has() not // — the // operator treats `false` as "needs alternative",
+  # which would mask disabled plugins as "missing".
+  jq -r --arg k "$1" 'if (.enabledPlugins // {}) | has($k) then .enabledPlugins[$k] | tostring else "missing" end' "$SETTINGS"
+}
+
+mcp_state() {
+  if jq -e --arg k "$1" '.mcpServers // {} | has($k)' "$MCPCONF" >/dev/null; then
+    echo "true"
+  elif jq -e --arg k "$1" '.mcpServersDisabled // {} | has($k)' "$MCPCONF" >/dev/null; then
+    echo "false"
+  else echo "missing"
+  fi
+}
+
+hook_state() {
+  local event="${1%%:*}" matcher="${1#*:}"
+  local in_e in_d
+  in_e=$(jq -r --arg e "$event" --arg m "$matcher" \
+    '(.hooks[$e] // []) | map(select((.matcher // "") == $m)) | length' "$SETTINGS")
+  in_d=$(jq -r --arg e "$event" --arg m "$matcher" \
+    '(.hooksDisabled[$e] // []) | map(select((.matcher // "") == $m)) | length' "$SETTINGS")
+  if [ "${in_e:-0}" -gt 0 ]; then echo "true"
+  elif [ "${in_d:-0}" -gt 0 ]; then echo "false"
+  else echo "missing"
+  fi
+}
+
+#------------------------------------------------------------------------------
+# Per-category toggle actions (json-based ones; file-based ones use fs_toggle)
+#------------------------------------------------------------------------------
+
+plugin_set() {
+  local key="$1" val="$2"
+  json_edit "$SETTINGS" --arg k "$key" --argjson v "$val" '.enabledPlugins[$k] = $v'
+  echo "  plugin '$key' → $([ "$val" = true ] && echo enabled || echo disabled)"
+  echo "  RESTART REQUIRED for change to take effect."
+}
+
+mcp_toggle() {
+  local action="$1" name="$2"
+  local cur_state="$(mcp_state "$name")"
+  if [ "$action" = "enable" ]; then
+    case "$cur_state" in
+      true)    echo "  mcp '$name' is already enabled — no change."; return ;;
+      missing) die "mcp '$name' not found in mcpServers or mcpServersDisabled" ;;
+    esac
+    json_edit "$MCPCONF" --arg k "$name" \
+      '.mcpServers = ((.mcpServers // {}) + {($k): .mcpServersDisabled[$k]}) |
+       .mcpServersDisabled = ((.mcpServersDisabled // {}) | del(.[$k]))'
+    echo "  mcp '$name' → enabled"
+  else
+    case "$cur_state" in
+      false)   echo "  mcp '$name' is already disabled — no change."; return ;;
+      missing) die "mcp '$name' not found in mcpServers" ;;
+    esac
+    json_edit "$MCPCONF" --arg k "$name" \
+      '.mcpServersDisabled = ((.mcpServersDisabled // {}) + {($k): .mcpServers[$k]}) |
+       .mcpServers = (.mcpServers | del(.[$k]))'
+    echo "  mcp '$name' → disabled"
+  fi
+  echo "  RESTART REQUIRED for change to take effect (or try /mcp for runtime reload)."
+}
+
+hook_toggle() {
+  local action="$1" name="$2" event="${2%%:*}" matcher="${2#*:}"
+  local cur_state="$(hook_state "$name")"
+  if [ "$action" = "enable" ]; then
+    case "$cur_state" in
+      true)    echo "  hook '$name' is already enabled — no change."; return ;;
+      missing) die "hook '$name' not found in hooks or hooksDisabled" ;;
+    esac
+    json_edit "$SETTINGS" --arg e "$event" --arg m "$matcher" \
+      '.hooks[$e] = ((.hooks[$e] // []) + ((.hooksDisabled[$e] // []) | map(select((.matcher // "") == $m)))) |
+       .hooksDisabled[$e] = ((.hooksDisabled[$e] // []) | map(select((.matcher // "") != $m))) |
+       if (.hooksDisabled[$e] | length) == 0 then .hooksDisabled |= del(.[$e]) else . end |
+       if (.hooksDisabled // {} | length) == 0 then del(.hooksDisabled) else . end'
+    echo "  hook '$name' → enabled"
+  else
+    case "$cur_state" in
+      false)   echo "  hook '$name' is already disabled — no change."; return ;;
+      missing) die "hook '$name' not found in hooks.$event" ;;
+    esac
+    json_edit "$SETTINGS" --arg e "$event" --arg m "$matcher" \
+      '.hooksDisabled[$e] = ((.hooksDisabled[$e] // []) + ((.hooks[$e] // []) | map(select((.matcher // "") == $m)))) |
+       .hooks[$e] = ((.hooks[$e] // []) | map(select((.matcher // "") != $m))) |
+       if (.hooks[$e] | length) == 0 then .hooks |= del(.[$e]) else . end'
+    echo "  hook '$name' → disabled"
+  fi
+  echo "  RESTART REQUIRED for change to take effect."
+}
+
+#------------------------------------------------------------------------------
+# Resolver — answer "what category does this name belong to?"
+# Output: "<category>:<key>" if unique, "AMBIGUOUS: ..." if multiple, empty if none.
+#------------------------------------------------------------------------------
+
+resolve_name() {
+  local name="$1"
+  local matches=()
+
+  # Plugins (allow bare prefix or full "name@marketplace" match)
+  local plugin_match
+  plugin_match=$(jq -r --arg n "$name" \
+    '.enabledPlugins | keys[] | select(startswith($n + "@") or . == $n)' \
+    "$SETTINGS" 2>/dev/null)
+  if [ -n "$plugin_match" ]; then
+    local plugin_count
+    plugin_count=$(echo "$plugin_match" | wc -l | tr -d ' ')
+    if [ "$plugin_count" -gt 1 ]; then
+      die "name '$name' matches multiple plugins; specify the full key:
+$(echo "$plugin_match" | sed 's/^/  /')"
+    fi
+    matches+=("plugin:$plugin_match")
+  fi
+
+  # Standalone skills (dir under enabled or disabled)
+  if [ -d "$SKILL_DIR/$name" ] || [ -d "$SKILL_DISABLED/$name" ]; then
+    matches+=("skill:$name")
+  fi
+
+  # MCP servers
+  if [ "$(mcp_state "$name")" != "missing" ]; then
+    matches+=("mcp:$name")
+  fi
+
+  # Slash commands
+  if [ -f "$CMD_DIR/$name.md" ] || [ -f "$CMD_DISABLED/$name.md" ]; then
+    matches+=("command:$name")
+  fi
+
+  # Subagents
+  if [ -f "$AGENT_DIR/$name.md" ] || [ -f "$AGENT_DISABLED/$name.md" ]; then
+    matches+=("agent:$name")
+  fi
+
+  # Hooks (regex allows empty matcher: PreToolUse: , Stop:, etc.)
+  if echo "$name" | grep -qE '^[A-Z][A-Za-z]+:'; then
+    if [ "$(hook_state "$name")" != "missing" ]; then
+      matches+=("hook:$name")
+    fi
+  fi
+
+  case ${#matches[@]} in
+    0) echo ""; return 1 ;;
+    1) echo "${matches[0]}"; return 0 ;;
+    *) echo "AMBIGUOUS: ${matches[*]}"; return 2 ;;
+  esac
+}
+
+#------------------------------------------------------------------------------
+# List action
+#------------------------------------------------------------------------------
+
+# Print a category section: header, items (with ✓/✗ markers), filtered by state.
+# Optional args 6-8 enable disk-size annotations:
+#   $6 = enabled_path (parent dir for enabled items)
+#   $7 = disabled_path (parent dir for disabled items)
+#   $8 = size_kind: "dir" (item is dir under parent) or "file" (item is <name>.md)
+print_section() {
+  local title="$1" filter="$2" empty_msg="$3"
+  local enabled_lister="$4" disabled_lister="$5"
+  local enabled_path="${6:-}" disabled_path="${7:-}" size_kind="${8:-}"
+
+  local total_label=""
+  if [ -n "$enabled_path" ]; then
+    total_label=$(size_label_total "$enabled_path" "$disabled_path")
+  fi
+  printf "═══ %s%s ═══\n" "$title" "$total_label"
+
+  local printed_any=0
+  if [ "$filter" != "disabled" ]; then
+    while IFS= read -r line; do
+      [ -z "$line" ] && continue
+      local ip="" sz=""
+      if [ -n "$enabled_path" ]; then
+        ip="$enabled_path/$line"
+        [ "$size_kind" = "file" ] && ip="${ip}.md"
+        sz=$(size_label "$ip")
+      fi
+      printf "  %s %s%s\n" "$OK" "$(link_wrap "$line" "$ip")" "$sz"
+      printed_any=1
+    done < <(eval "$enabled_lister" | sort)
+  fi
+  if [ "$filter" != "enabled" ]; then
+    while IFS= read -r line; do
+      [ -z "$line" ] && continue
+      local ip="" sz=""
+      if [ -n "$disabled_path" ]; then
+        ip="$disabled_path/$line"
+        [ "$size_kind" = "file" ] && ip="${ip}.md"
+        sz=$(size_label "$ip")
+      fi
+      printf "  %s %s%s\n" "$NO" "$(link_wrap "$line" "$ip")" "$sz"
+      printed_any=1
+    done < <(eval "$disabled_lister" | sort)
+  fi
+  [ "$printed_any" -eq 0 ] && [ -n "$empty_msg" ] && echo "  $empty_msg"
+  echo ""
+}
+
+list_action() {
+  local filter="${1:-}"   # ""|enabled|disabled
+  local category="${2:-}" # ""|plugin|skill|mcp|command|agent|hook
+
+  # Normalize plural / abbreviation aliases for category.
+  case "$category" in
+    ""|plugin|skill|mcp|command|agent|hook) ;;
+    plugins)                   category="plugin" ;;
+    skills)                    category="skill" ;;
+    cmd|cmds|commands)         category="command" ;;
+    agents|subagent|subagents) category="agent" ;;
+    hooks)                     category="hook" ;;
+    *) die "unknown category: $category (use plugin, skill, mcp, command, agent, hook)" ;;
+  esac
+
+  # PLUGINS (custom section: paths nested as cache/<marketplace>/<plugin>/)
+  if [ -z "$category" ] || [ "$category" = "plugin" ]; then
+    local plug_total
+    plug_total=$(size_label_total $HOME/.claude/plugins/cache/*/*)
+    printf "═══ PLUGINS%s ═══\n" "$plug_total"
+    if [ "$filter" != "disabled" ]; then
+      jq -r '.enabledPlugins // {} | to_entries[] | select(.value == true) | .key' "$SETTINGS" \
+        | sort | while read -r key; do
+            local plugin="${key%%@*}" market="${key#*@}"
+            local pdir="$HOME/.claude/plugins/cache/$market/$plugin"
+            local sz; sz=$(size_label "$pdir")
+            printf "  %s %s%s\n" "$OK" "$(link_wrap "$key" "$pdir")" "$sz"
+          done
+    fi
+    if [ "$filter" != "enabled" ]; then
+      jq -r '.enabledPlugins // {} | to_entries[] | select(.value == false) | .key' "$SETTINGS" \
+        | sort | while read -r key; do
+            local plugin="${key%%@*}" market="${key#*@}"
+            local pdir="$HOME/.claude/plugins/cache/$market/$plugin"
+            local sz; sz=$(size_label "$pdir")
+            printf "  %s %s%s\n" "$NO" "$(link_wrap "$key" "$pdir")" "$sz"
+          done
+    fi
+    echo ""
+  fi
+
+  # PLUGIN SKILLS (read-only: bundled inside enabled plugins, lifecycle-tied)
+  if { [ -z "$category" ] || [ "$category" = "skill" ]; } && [ "$filter" != "disabled" ]; then
+    local pskill_dirs=()
+    while IFS= read -r key; do
+      [ -z "$key" ] && continue
+      local plugin="${key%%@*}" market="${key#*@}"
+      local d
+      for d in "$HOME/.claude/plugins/cache/$market/$plugin"/*/skills; do
+        [ -d "$d" ] && pskill_dirs+=("$d")
+      done
+    done < <(jq -r '.enabledPlugins // {} | to_entries[] | select(.value == true) | .key' "$SETTINGS")
+
+    local pskill_total=""
+    [ ${#pskill_dirs[@]} -gt 0 ] && pskill_total=$(size_label_total "${pskill_dirs[@]}")
+    printf "═══ PLUGIN SKILLS%s ═══\n" "$pskill_total"
+
+    local pskill_any=0
+    while IFS= read -r key; do
+      [ -z "$key" ] && continue
+      local plugin="${key%%@*}" market="${key#*@}"
+      local skill_dir
+      for skill_dir in "$HOME/.claude/plugins/cache/$market/$plugin"/*/skills/*/; do
+        [ -d "$skill_dir" ] || continue
+        local skill_name; skill_name=$(basename "$skill_dir")
+        local sz; sz=$(size_label "$skill_dir")
+        printf "  %s %s %s(%s)%s%s\n" "$OK" "$(link_wrap "$skill_name" "$skill_dir")" "$GRAY" "$plugin" "$RESET" "$sz"
+        pskill_any=1
+      done
+    done < <(jq -r '.enabledPlugins // {} | to_entries[] | select(.value == true) | .key' "$SETTINGS" | sort)
+    [ "$pskill_any" -eq 0 ] && echo "  (no plugin-bundled skills)"
+    echo ""
+  fi
+
+  # STANDALONE SKILLS (with sizes)
+  if [ -z "$category" ] || [ "$category" = "skill" ]; then
+    print_section "STANDALONE SKILLS" "$filter" "" \
+      "list_entries \"$SKILL_DIR\"" \
+      "list_entries \"$SKILL_DISABLED\"" \
+      "$SKILL_DIR" "$SKILL_DISABLED" dir
+  fi
+
+  # MCP SERVERS (no disk size — config only)
+  if [ -z "$category" ] || [ "$category" = "mcp" ]; then
+    print_section "MCP SERVERS" "$filter" "(no MCP servers configured)" \
+      "jq -r '.mcpServers // {} | keys[]?' \"$MCPCONF\"" \
+      "jq -r '.mcpServersDisabled // {} | keys[]?' \"$MCPCONF\""
+  fi
+
+  # SLASH COMMANDS (with sizes)
+  if [ -z "$category" ] || [ "$category" = "command" ]; then
+    print_section "SLASH COMMANDS" "$filter" "(no standalone slash commands)" \
+      "list_entries \"$CMD_DIR\" .md" \
+      "list_entries \"$CMD_DISABLED\" .md" \
+      "$CMD_DIR" "$CMD_DISABLED" file
+  fi
+
+  # SUBAGENTS (with sizes)
+  if [ -z "$category" ] || [ "$category" = "agent" ]; then
+    print_section "SUBAGENTS" "$filter" "(no standalone subagents)" \
+      "list_entries \"$AGENT_DIR\" .md" \
+      "list_entries \"$AGENT_DISABLED\" .md" \
+      "$AGENT_DIR" "$AGENT_DISABLED" file
+  fi
+
+  # HOOKS
+  if [ -z "$category" ] || [ "$category" = "hook" ]; then
+    print_section "HOOKS (name = <event>:<matcher>)" "$filter" "(no hooks configured)" \
+      "jq -r '(.hooks // {}) | to_entries[] | .key as \$e | .value[] | \"\\(\$e):\\(.matcher // \"\")\"' \"$SETTINGS\" | sort -u" \
+      "jq -r '(.hooksDisabled // {}) | to_entries[] | .key as \$e | .value[] | \"\\(\$e):\\(.matcher // \"\")\"' \"$SETTINGS\" | sort -u"
+  fi
+
+  # SUMMARY: only when listing all categories — meaningless for a single-section view.
+  [ -n "$category" ] && return
+
+  # (one jq pass for all settings.json counts; fs counts via helper)
+  local counts
+  counts=$(jq -r '
+    {
+      pe: (.enabledPlugins // {} | [.[] | select(. == true)] | length),
+      pd: (.enabledPlugins // {} | [.[] | select(. == false)] | length),
+      he: ([(.hooks // {}) | to_entries[] | .value[]] | length),
+      hd: ([(.hooksDisabled // {}) | to_entries[] | .value[]] | length)
+    } | "\(.pe) \(.pd) \(.he) \(.hd)"
+  ' "$SETTINGS")
+  read -r pe pd he hd <<< "$counts"
+  # MCP counts come from a DIFFERENT file — see MCPCONF above.
+  local me md
+  me=$(jq -r '.mcpServers // {} | length' "$MCPCONF" 2>/dev/null || echo 0)
+  md=$(jq -r '.mcpServersDisabled // {} | length' "$MCPCONF" 2>/dev/null || echo 0)
+  local se sd ce cd ae ad pse
+  se=$(count_entries "$SKILL_DIR")
+  sd=$(count_entries "$SKILL_DISABLED")
+  ce=$(count_entries "$CMD_DIR" .md)
+  cd=$(count_entries "$CMD_DISABLED" .md)
+  ae=$(count_entries "$AGENT_DIR" .md)
+  ad=$(count_entries "$AGENT_DISABLED" .md)
+  pse=0
+  while IFS= read -r key; do
+    [ -z "$key" ] && continue
+    local plugin="${key%%@*}" market="${key#*@}"
+    local skill_dir
+    for skill_dir in "$HOME/.claude/plugins/cache/$market/$plugin"/*/skills/*/; do
+      [ -d "$skill_dir" ] && pse=$((pse + 1))
+    done
+  done < <(jq -r '.enabledPlugins // {} | to_entries[] | select(.value == true) | .key' "$SETTINGS")
+  echo "Summary:  Plugins $pe$OK/$pd$NO  |  Skills $se$OK/$sd$NO  |  PSkills $pse$OK  |  Cmds $ce$OK/$cd$NO  |  Agents $ae$OK/$ad$NO  |  MCP $me$OK/$md$NO  |  Hooks $he$OK/$hd$NO"
+  always_loaded_line
+  echo "Toggle with: /cc-xtn enable <name> [<name>...]  or  /cc-xtn disable <name> [<name>...]"
+}
+
+#------------------------------------------------------------------------------
+# Help
+#------------------------------------------------------------------------------
+
+help_action() {
+  cat <<'EOF'
+═══ /cc-xtn — Claude Code extensions manager ═══
+
+USAGE
+  /cc-xtn enable <name> [<name>...]   enable one or more (space-separated)
+  /cc-xtn disable <name> [<name>...]  disable one or more (space-separated)
+  /cc-xtn status <name>       show current state + category for <name>
+  /cc-xtn list                enumerate everything, grouped, with state
+  /cc-xtn list <category>     only the named category (plugins|skills|mcp|
+                              commands|agents|hooks; singular/plural both ok)
+  /cc-xtn list <category> --enabled   filter a category by state
+  /cc-xtn list --enabled      only show enabled (all categories)
+  /cc-xtn list --disabled     only show disabled (all categories)
+  /cc-xtn --enabled           shortcut for `list --enabled`
+  /cc-xtn --disabled          shortcut for `list --disabled`
+  /cc-xtn help                show this help
+
+CATEGORIES
+  plugin      ~/.claude/settings.json enabledPlugins (true/false flip)
+  skill       ~/.agents/skills/ ↔ ~/.agents/disabled-skills/ (dir move)
+  command     ~/.claude/commands/ ↔ ~/.claude/disabled-commands/ (file move, .md)
+  agent       ~/.claude/agents/ ↔ ~/.claude/disabled-agents/ (file move, .md)
+  mcp         ~/.claude.json mcpServers ↔ mcpServersDisabled (json move)
+  hook        ~/.claude/settings.json hooks.<event> ↔ hooksDisabled.<event>
+              Named as <event>:<matcher>, e.g. PreToolUse:Bash or Stop:
+
+NOTES
+  - `list` (all categories) ends with an Always-loaded line: total size of
+    ~/.claude/rules/*.md + CLAUDE.md, which load on EVERY turn, split into
+    path-scoped vs always-on. Skill/command BODIES are NOT counted — they
+    load only on invocation, so they cost nothing per turn.
+  - All toggles require a Claude Code restart to take effect (script prints
+    "RESTART REQUIRED" when applicable). MCP may pick up via `/mcp` runtime reload.
+  - Name resolution scans plugin → skill → mcp → command → agent → hook in order.
+    If ambiguous, the script lists matches and asks for the disambiguating prefix
+    (e.g. plugin:foo, skill:foo, mcp:foo).
+  - Hooks use composite naming: 'PreToolUse:Bash' enables/disables ALL hooks on
+    the PreToolUse event with matcher 'Bash'. Empty matcher: 'Stop:' or 'SessionEnd:'.
+  - Settings.json edits are atomic (mktemp + validate + rename) and back up the
+    prior good state to ~/.claude/settings.json.bak.
+EOF
+}
+
+#------------------------------------------------------------------------------
+# Dispatch
+#------------------------------------------------------------------------------
+
+# Print "  category  name  →  ✓ enabled" or "  category  name  →  ✗ disabled"
+print_state_line() {
+  local category="$1" key="$2" state="$3"
+  local marker
+  if [ "$state" = "true" ]; then marker="$OK enabled"
+  elif [ "$state" = "false" ]; then marker="$NO disabled"
+  else marker="? $state"
+  fi
+  printf "  %-8s %s  →  %s\n" "$category" "$key" "$marker"
+}
+
+handle_status() {
+  local target="$1"
+  local resolved
+  resolved=$(resolve_name "$target") || true
+  [ -n "$resolved" ] || die "name '$target' not found in any category"
+  case "$resolved" in
+    AMBIGUOUS:*)
+      echo "  AMBIGUOUS — name '$target' matches multiple categories:"
+      for m in ${resolved#AMBIGUOUS: }; do echo "    $m"; done
+      echo "  Use the prefixed form (e.g. 'plugin:$target') to disambiguate."
+      exit 1 ;;
+    plugin:*)  print_state_line plugin  "${resolved#plugin:}"  "$(plugin_state  "${resolved#plugin:}")" ;;
+    skill:*)   print_state_line skill   "${resolved#skill:}"   "$(fs_state dir  "$SKILL_DIR" "$SKILL_DISABLED" "${resolved#skill:}")" ;;
+    command:*) print_state_line command "${resolved#command:}" "$(fs_state file "$CMD_DIR"   "$CMD_DISABLED"   "${resolved#command:}")" ;;
+    agent:*)   print_state_line agent   "${resolved#agent:}"   "$(fs_state file "$AGENT_DIR" "$AGENT_DISABLED" "${resolved#agent:}")" ;;
+    mcp:*)     print_state_line mcp     "${resolved#mcp:}"     "$(mcp_state "${resolved#mcp:}")" ;;
+    hook:*)    print_state_line hook    "${resolved#hook:}"    "$(hook_state "${resolved#hook:}")" ;;
+  esac
+}
+
+handle_toggle() {
+  local action="$1" target="$2"
+  local val; [ "$action" = enable ] && val=true || val=false
+
+  # Allow prefixed form: plugin:foo, skill:foo, command:foo, agent:foo, mcp:foo, hook:Event:Matcher
+  local resolved=""
+  case "$target" in
+    plugin:*|skill:*|command:*|agent:*|mcp:*|hook:*) resolved="$target" ;;
+    *) resolved=$(resolve_name "$target") || true ;;
+  esac
+  [ -n "$resolved" ] || die "name '$target' not found in any category"
+
+  case "$resolved" in
+    AMBIGUOUS:*)
+      echo "  AMBIGUOUS — name '$target' matches multiple categories:"
+      for m in ${resolved#AMBIGUOUS: }; do echo "    $m"; done
+      echo "  Use the prefixed form (e.g. 'plugin:$target') to disambiguate."
+      exit 1 ;;
+    plugin:*)
+      local k="${resolved#plugin:}"
+      if ! echo "$k" | grep -q '@'; then
+        # Resolve bare name to full "name@marketplace" key
+        k=$(jq -r --arg n "$k" '.enabledPlugins | keys[] | select(startswith($n + "@"))' "$SETTINGS" | head -1)
+        [ -n "$k" ] || die "plugin '$target' not found"
+      fi
+      plugin_set "$k" "$val" ;;
+    skill:*)
+      fs_toggle "$action" dir  "$SKILL_DIR" "$SKILL_DISABLED" skill   "${resolved#skill:}" ;;
+    command:*)
+      fs_toggle "$action" file "$CMD_DIR"   "$CMD_DISABLED"   command "${resolved#command:}" ;;
+    agent:*)
+      fs_toggle "$action" file "$AGENT_DIR" "$AGENT_DISABLED" agent   "${resolved#agent:}" ;;
+    mcp:*)
+      mcp_toggle  "$action" "${resolved#mcp:}" ;;
+    hook:*)
+      hook_toggle "$action" "${resolved#hook:}" ;;
+  esac
+}
+
+main() {
+  if [ $# -eq 0 ]; then help_action; exit 0; fi
+  # Subcommand prefix matching: l/li/lis → list, e/en/ena → enable,
+  # d/dis/disa → disable, h → help, s/st/sta → status.
+  local sub="$1"; shift
+  case "$sub" in
+    h|help|-h|--help|'?')         help_action ;;
+    l|li|lis|list)
+      local _filter="" _category=""
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          --enabled|-e)  _filter="enabled" ;;
+          --disabled|-d) _filter="disabled" ;;
+          -*) die "unknown list flag: $1 (use --enabled or --disabled)" ;;
+          *)  [ -z "$_category" ] || die "list takes at most one category (got: $_category $1)"
+              _category="$1" ;;
+        esac
+        shift
+      done
+      list_action "$_filter" "$_category" ;;
+    --enabled|-e)                 list_action enabled ;;
+    --disabled|-d)                list_action disabled ;;
+    s|st|sta|stat|statu|status)
+      [ $# -ge 1 ] || die "status requires <name>"
+      handle_status "$1" ;;
+    e|en|ena|enab|enabl|enable)
+      [ $# -ge 1 ] || die "enable requires <name> [<name>...]"
+      rc=0
+      for n in "$@"; do
+        (handle_toggle enable "$n") || rc=1
+      done
+      exit "$rc" ;;
+    d|di|dis|disa|disab|disabl|disable)
+      [ $# -ge 1 ] || die "disable requires <name> [<name>...]"
+      rc=0
+      for n in "$@"; do
+        (handle_toggle disable "$n") || rc=1
+      done
+      exit "$rc" ;;
+    *)
+      die "unknown subcommand: $sub (try: /cc-xtn help)" ;;
+  esac
+}
+
+main "$@"

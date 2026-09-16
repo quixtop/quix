@@ -1,0 +1,1 @@
+/Users/shrix/.local/bin/proj-env.sh

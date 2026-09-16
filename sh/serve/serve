@@ -1,0 +1,305 @@
+#!/usr/bin/env python3
+# (c) Shrix
+# author: shrix
+"""serve — a shared local HTTP server that reaps itself.
+
+The problem this exists to solve: `python3 -m http.server` (and anything built
+on it, e.g. the old open-md) outlives the browser tab that needed it. Nothing
+closes it, nobody notices, and ports leak until the next reboot.
+
+Here every server has an IDLE TIMEOUT. Once no request has arrived for --idle
+seconds it exits on its own, so closing the tab is enough. `serve list` and
+`serve stop` are for when you want to be explicit.
+
+Meant to be reused: any script can call `serve <dir>` and parse the URL from
+stdout, or import pick_port()/spawn() directly.
+
+  serve                     serve $PWD, print the URL, auto-exit when idle
+  serve dist/ -o            serve a directory and open it in the browser
+  serve report.html -o      serve a single FILE (its directory, opened at it)
+  serve list                what is running right now
+  serve stop 8800 | all     shut one down, or all of them
+"""
+
+import atexit as _atexit, sys as _sys
+# Trailing gap — one blank line after output, TTY only, so piped or redirected
+# output stays exactly the data.
+_atexit.register(lambda: _sys.stdout.isatty() and print())
+import argparse
+import errno
+import functools
+import http.server
+import json
+import os
+import signal
+import socket
+import socketserver
+import subprocess
+import sys
+import threading
+import time
+
+STATE = os.path.expanduser("~/.local/state/serve")
+PORT_LO, PORT_HI = 8800, 8899
+DEFAULT_IDLE = 300
+
+
+def state_dir():
+    os.makedirs(STATE, exist_ok=True)
+    return STATE
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+    except OSError as e:
+        return e.errno == errno.EPERM
+    return True
+
+
+def records():
+    """Live records only — prune entries whose process is gone."""
+    out = []
+    for name in sorted(os.listdir(state_dir())):
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(STATE, name)
+        try:
+            with open(path) as f:
+                r = json.load(f)
+        except (OSError, ValueError):
+            os.unlink(path)
+            continue
+        if alive(r.get("pid", -1)):
+            out.append(r)
+        else:
+            os.unlink(path)                      # self-healing stale entry
+    return out
+
+
+def port_free(port):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind(("127.0.0.1", port))
+            return True
+        except OSError:
+            return False
+
+
+def pick_port(preferred=None):
+    if preferred:
+        if not port_free(preferred):
+            sys.exit(f"serve: port {preferred} is in use")
+        return preferred
+    for p in range(PORT_LO, PORT_HI + 1):
+        if port_free(p):
+            return p
+    sys.exit(f"serve: no free port in {PORT_LO}-{PORT_HI}")
+
+
+# ── the server ──────────────────────────────────────────────────────────────
+class Handler(http.server.SimpleHTTPRequestHandler):
+    last = time.time()
+
+    def handle_one_request(self):
+        Handler.last = time.time()
+        super().handle_one_request()
+
+    def log_message(self, fmt, *a):
+        if not self.server.quiet:
+            sys.stderr.write("  %s %s\n" % (self.address_string(), fmt % a))
+
+    def end_headers(self):
+        # Local previews must never be cached, or an edit-reload shows stale
+        # content and the next 10 minutes go into debugging the wrong thing.
+        self.send_header("Cache-Control", "no-store, must-revalidate")
+        super().end_headers()
+
+
+class Server(socketserver.ThreadingTCPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+    quiet = False
+
+
+def watchdog(httpd, idle):
+    """Exit once nothing has been requested for `idle` seconds."""
+    if idle <= 0:
+        return
+    while True:
+        time.sleep(min(5, idle))
+        if time.time() - Handler.last > idle:
+            httpd.shutdown()
+            return
+
+
+def run(directory, port, idle, quiet):
+    rec = os.path.join(state_dir(), f"{port}.json")
+    httpd = Server(("127.0.0.1", port),
+                   functools.partial(Handler, directory=directory))
+    httpd.quiet = quiet
+    with open(rec, "w") as f:
+        json.dump({"pid": os.getpid(), "port": port, "dir": directory,
+                   "url": f"http://127.0.0.1:{port}/", "idle": idle,
+                   "started": time.time()}, f)
+
+    def bye(*_):
+        # shutdown() blocks until serve_forever returns, so calling it from the
+        # handler -- which runs ON the serve_forever thread -- deadlocks and the
+        # process survives its own SIGTERM. Hand it to another thread.
+        threading.Thread(target=httpd.shutdown, daemon=True).start()
+    signal.signal(signal.SIGTERM, bye)
+    signal.signal(signal.SIGINT, bye)
+    threading.Thread(target=watchdog, args=(httpd, idle), daemon=True).start()
+    try:
+        httpd.serve_forever(poll_interval=0.5)
+    finally:
+        httpd.server_close()
+        try:
+            os.unlink(rec)
+        except OSError:
+            pass
+
+
+def spawn(target, port=None, idle=DEFAULT_IDLE, quiet=True):
+    """LIBRARY ENTRY POINT — start a server, return its URL. Non-blocking.
+
+        from serve import spawn
+        url = spawn("/path/to/report.html")     # -> http://127.0.0.1:8800/report.html
+
+    Any script can use this; the server reaps itself after `idle` seconds with
+    no requests, so the caller has nothing to clean up. Pass idle=0 to keep it
+    alive indefinitely (then YOU own stopping it).
+    """
+    target = os.path.abspath(target)
+    if os.path.isdir(target):
+        directory, leaf = target, ""
+    elif os.path.isfile(target):
+        directory, leaf = os.path.dirname(target), os.path.basename(target)
+    else:
+        raise FileNotFoundError(target)
+    port = pick_port(port)
+    if os.fork() == 0:
+        os.setsid()
+        fd = os.open(os.devnull, os.O_RDWR)
+        os.dup2(fd, 0), os.dup2(fd, 1), os.dup2(fd, 2)
+        run(directory, port, idle, True)
+        os._exit(0)
+    for _ in range(60):
+        if not port_free(port):
+            break
+        time.sleep(0.05)
+    return f"http://127.0.0.1:{port}/{leaf}"
+
+
+def stop(which):
+    """Stop one server by port, or every server with `all`. -> [urls stopped]"""
+    hit = [r for r in records() if which == "all" or str(r["port"]) == str(which)]
+    for r in hit:
+        try:
+            os.kill(r["pid"], signal.SIGTERM)
+        except OSError:
+            pass
+    return [r["url"] for r in hit]
+
+
+def status(kind, msg):
+    """Closing status line + blank line, always on STDERR — stdout is the URL
+    and must stay pipeable. Colour only on a TTY. See code-quality rule
+    § Script Output Contract."""
+    glyph, colour = {"ok": ("✓", "\033[0;32m"),
+                     "warn": ("⚠", "\033[1;33m"),
+                     "fail": ("✗", "\033[0;31m")}.get(kind, ("✓", "\033[0;32m"))
+    if sys.stderr.isatty():
+        print(f"{colour}{glyph} {msg}\033[0m\n", file=sys.stderr)
+    else:
+        print(f"{glyph} {msg}\n", file=sys.stderr)
+
+
+def main():
+    # Subcommands are handled BEFORE argparse: `serve stop all` would otherwise
+    # die on "unrecognized arguments: all", since `target` takes only one value.
+    argv = sys.argv[1:]
+    if argv and argv[0] == "list":
+        rs = records()
+        if not rs:
+            print("no servers running")
+            return
+        for r in rs:
+            age = int(time.time() - r["started"])
+            print(f"  {r['url']}  pid {r['pid']}  idle-timeout {r['idle']}s  "
+                  f"up {age // 60}m{age % 60:02d}s  {r['dir']}")
+        return
+    if argv and argv[0] == "stop":
+        if len(argv) < 2:
+            sys.exit("serve: usage — serve stop <port|all>")
+        urls = stop(argv[1])
+        print("\n".join(f"stopped {u}" for u in urls)
+              or f"no server matching {argv[1]!r}")
+        return
+
+    ap = argparse.ArgumentParser(
+        prog="serve", formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="Local HTTP server with an idle timeout, so it reaps itself.",
+        epilog="Closing the browser tab is enough: with no requests arriving,\n"
+               "the server exits after --idle seconds. Use `serve list` to see\n"
+               "what is up and `serve stop all` to be certain.")
+    ap.add_argument("target", nargs="?", default=".",
+                    help="directory to serve, or a file (serves its directory "
+                         "and opens at that file)")
+    ap.add_argument("-p", "--port", type=int, help=f"default: first free "
+                    f"{PORT_LO}-{PORT_HI}")
+    ap.add_argument("-t", "--idle", type=int, default=DEFAULT_IDLE, metavar="SECS",
+                    help=f"exit after SECS with no requests (default "
+                         f"{DEFAULT_IDLE}; 0 = never, and you own stopping it)")
+    ap.add_argument("-o", "--open", action="store_true",
+                    help="open it in the default browser")
+    ap.add_argument("-f", "--foreground", action="store_true",
+                    help="stay attached instead of backgrounding")
+    ap.add_argument("-q", "--quiet", action="store_true", help="no request log")
+    args = ap.parse_args()
+
+    target = os.path.abspath(args.target)
+    if os.path.isdir(target):
+        directory, leaf = target, ""
+    elif os.path.isfile(target):
+        directory, leaf = os.path.dirname(target), os.path.basename(target)
+    else:
+        sys.exit(f"serve: no such file or directory: {args.target}")
+
+    port = pick_port(args.port)
+    url = f"http://127.0.0.1:{port}/{leaf}"
+
+    if args.foreground:
+        print(f"{url}\n  serving {directory}  (idle timeout {args.idle}s, ^C to stop)")
+        if args.open:
+            subprocess.run(["open", url], check=False)
+        run(directory, port, args.idle, args.quiet)
+        return
+
+    pid = os.fork()
+    if pid == 0:
+        os.setsid()
+        devnull = os.open(os.devnull, os.O_RDWR)
+        os.dup2(devnull, 0)
+        os.dup2(devnull, 1)
+        os.dup2(devnull, 2)
+        run(directory, port, args.idle, True)
+        os._exit(0)
+
+    for _ in range(60):                     # wait for the port to answer
+        if not port_free(port):
+            break
+        time.sleep(0.05)
+    print(url)
+    if args.open:
+        subprocess.run(["open", url], check=False)
+    if not args.quiet:
+        print(f"  serving {directory}", file=sys.stderr)
+        status("ok", f"serving on {url} — exits after {args.idle}s idle  ·  "
+                     f"serve stop {port}")
+
+
+if __name__ == "__main__":
+    main()

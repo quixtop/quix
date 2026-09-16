@@ -1,0 +1,207 @@
+#!/bin/bash
+# (c) Shrix
+# author: shrix
+# cc-chk — monitor Claude Code config file size with health indicators
+# Reports total ~/.claude.json size plus per-project history-blob byte counts.
+# Health icons: ✅ healthy | ⚠️ growing | 🚨 cleanup needed
+
+set -euo pipefail
+
+# Trailing gap — one blank line after this script's output, TTY only, so piped
+# or redirected output stays exactly the data. Fires on every exit path.
+_gap() { [ -t 1 ] && printf '\n'; return 0; }
+trap _gap EXIT
+
+show_help() {
+    cat <<'HELP'
+cc-chk — monitor Claude Code config file size with health indicators
+
+USAGE
+  cc-chk                Show ~/.claude.json size + per-project history bytes
+  cc-chk --json         Emit the data as JSON
+  cc-chk --html         Render an HTML card and open it in the browser
+  cc-chk --widget       Emit the inline-widget JSON envelope (skill render)
+  cc-chk -h, --help     Show this help
+
+HEALTH THRESHOLDS
+  ✅ healthy           total < 50 KB    per-project < 5 KB
+  ⚠️  growing          total 50–100 KB   per-project 5–50 KB
+  🚨 cleanup needed    total > 100 KB    per-project > 50 KB
+
+OUTPUT
+  Total size, then per-project history bytes with health icons. Projects show
+  by name (last path segment); the full path is in --json and on hover in the
+  HTML/widget views.
+HELP
+}
+
+case "${1:-}" in
+    -h|--help) show_help; exit 0 ;;
+esac
+
+# Guard the one input every mode depends on. A running Claude session may be
+# mid-write, so a read can momentarily see a truncated (invalid-JSON) file —
+# validate once, retry after a short pause, then fail with a clear message
+# instead of a raw jq/stat abort under `set -e`. No cost on the happy path.
+CONFIG="$HOME/.claude.json"
+ensure_config() {
+    local i
+    for i in 1 2; do
+        if [[ -f "$CONFIG" ]] && /usr/bin/jq -e . "$CONFIG" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.2
+    done
+    printf "cc-chk: %s is missing or not valid JSON right now " "$CONFIG" >&2
+    printf "(a running Claude session may be writing it — try again).\n" >&2
+    exit 1
+}
+ensure_config
+
+# Single source of per-project data — shortened path, project name (last path
+# segment), history-blob bytes, and health status — sorted largest first. Every
+# view (json/html/widget/terminal) reads from this, so the path→name rule lives
+# in one place (not re-derived at render time).
+projects_json() {
+  /usr/bin/jq -c --arg home "$HOME" '
+    def pstatus(b): if b > 51200 then "cleanup" elif b > 5120 then "growing" else "healthy" end;
+    [ .projects | to_entries[]
+      | (.value | tostring | length) as $b
+      | (.key | if startswith($home) then "~" + .[($home|length):] else . end) as $path
+      | { path: $path,
+          name: ($path | sub("/+$";"") | split("/") | last),
+          bytes: $b,
+          status: pstatus($b) } ]
+    | sort_by(-.bytes)
+  ' "$HOME/.claude.json"
+}
+
+# --json — machine-readable payload (project data from projects_json + totals).
+if [[ "${1:-}" == "--json" ]]; then
+  file_size=$(stat -f %z "$HOME/.claude.json")
+  projects_json | /usr/bin/jq --argjson total "$file_size" '
+    def tstatus(b): if b > 102400 then "cleanup" elif b > 51200 then "growing" else "healthy" end;
+    { total_bytes: $total,
+      total_kb: ($total / 1024 | floor),
+      total_status: tstatus($total),
+      projects: . }'
+  exit 0
+fi
+
+# --html — generate a self-contained HTML card and open it in the browser.
+# Pure bash/jq, zero LLM: the same data + thresholds as the terminal view.
+if [[ "${1:-}" == "--html" ]]; then
+  out="${TMPDIR:-/tmp}/cc-chk.html"
+  file_size=$(stat -f %z "$HOME/.claude.json")
+  kb=$((file_size / 1024))
+  if   [[ $file_size -gt 102400 ]]; then badge="🚨 cleanup"; bcol="#e05656"
+  elif [[ $file_size -gt 51200  ]]; then badge="⚠️ growing"; bcol="#e0a83e"
+  else                                    badge="✅ healthy"; bcol="#3fb950"; fi
+  projs=$(projects_json)
+  count=$(printf '%s' "$projs" | /usr/bin/jq 'length')
+  more=$(( count > 8 ? count - 8 : 0 ))
+  rows=$(printf '%s' "$projs" | /usr/bin/jq -r '
+    def col(s): if s=="cleanup" then "#e05656" elif s=="growing" then "#e0a83e" else "#3fb950" end;
+    (.[0].bytes) as $max
+    | .[:8][]
+    | "<div class=r><span class=d style=\"background:\(col(.status))\"></span>"
+      + "<span class=p title=\"\(.path | @html)\">\(.name | @html)</span>"
+      + "<span class=t><span class=f style=\"width:\(((.bytes*100/$max)|floor))%;background:\(col(.status))\"></span></span>"
+      + "<span class=b>\(.bytes) B</span></div>"
+  ')
+
+  cat > "$out" <<'HEAD'
+<!doctype html><html lang=en><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<title>cc-chk · config health</title>
+<style>
+:root{color-scheme:light dark}
+body{margin:0;font:14px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0d1117;color:#e6edf3;display:flex;justify-content:center;padding:32px}
+@media(prefers-color-scheme:light){body{background:#f6f8fa;color:#1f2328}}
+.card{width:100%;max-width:560px}
+.hdr{display:flex;justify-content:space-between;align-items:center;border:1px solid #30363d;border-radius:12px;padding:14px 16px;margin-bottom:18px}
+@media(prefers-color-scheme:light){.hdr{border-color:#d0d7de}}
+.lbl{font-size:12px;opacity:.6}.kb{font-size:26px;font-weight:600}
+.badge{display:inline-block;padding:3px 10px;border:1px solid;border-radius:999px;font-size:12px;font-weight:600}
+.sub{font-size:12px;opacity:.6;margin-top:5px}.secn{font-size:12px;opacity:.6;margin-bottom:10px}
+.r{display:flex;align-items:center;gap:10px;margin-bottom:6px;font-size:12px}
+.d{width:7px;height:7px;border-radius:50%;flex:none}
+.p{width:120px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;opacity:.85}
+.t{flex:1;height:8px;background:#21262d;border-radius:4px;overflow:hidden}
+@media(prefers-color-scheme:light){.t{background:#eaeef2}}
+.f{display:block;height:100%;border-radius:4px}
+.b{width:60px;text-align:right;opacity:.6;font-variant-numeric:tabular-nums}
+.more{font-size:12px;opacity:.5;margin-top:8px}
+</style></head><body><div class=card>
+HEAD
+  printf '<div class=hdr><div><div class=lbl>~/.claude.json</div><div class=kb>%s KB</div></div><div style="text-align:right"><span class=badge style="color:%s;border-color:%s">%s</span><div class=sub>%s projects</div></div></div>\n' "$kb" "$bcol" "$bcol" "$badge" "$count" >> "$out"
+  printf '<div class=secn>largest contributors</div>\n' >> "$out"
+  printf '%s\n' "$rows" >> "$out"
+  [[ $more -gt 0 ]] && printf '<div class=more>+ %s more</div>\n' "$more" >> "$out"
+  printf '</div></body></html>\n' >> "$out"
+
+  echo "cc-chk: wrote $out"
+  open "$out" 2>/dev/null || echo "cc-chk: open it manually → $out"
+  exit 0
+fi
+
+# --widget — emit the inline-widget envelope {title, loading_messages,
+# widget_code} for the skill to forward to show_widget. CC-native fragment
+# (CSS variables, no hardcoded background, centred). Pure bash/jq, zero LLM.
+if [[ "${1:-}" == "--widget" ]]; then
+  file_size=$(stat -f %z "$HOME/.claude.json")
+  kb=$((file_size / 1024))
+  if   [[ $file_size -gt 102400 ]]; then badge="🚨 cleanup"; bvar="danger"
+  elif [[ $file_size -gt 51200  ]]; then badge="⚠️ growing"; bvar="warning"
+  else                                    badge="✅ healthy"; bvar="success"; fi
+  projs=$(projects_json)
+  count=$(printf '%s' "$projs" | /usr/bin/jq 'length')
+  more=$(( count > 8 ? count - 8 : 0 ))
+
+  rows=$(printf '%s' "$projs" | /usr/bin/jq -r '
+    def cvar(s): if s=="cleanup" then "danger" elif s=="growing" then "warning" else "success" end;
+    (.[0].bytes) as $max
+    | .[:8][]
+    | "<div style=\"display:flex;align-items:center;gap:10px;margin-bottom:5px;font-size:12px\">"
+      + "<span style=\"width:6px;height:6px;border-radius:50%;flex:none;background:var(--text-\(cvar(.status)))\"></span>"
+      + "<span title=\"\(.path | @html)\" style=\"width:120px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text-secondary)\">\(.name | @html)</span>"
+      + "<span style=\"flex:1;height:8px;background:var(--surface-1);border-radius:4px;overflow:hidden\"><span style=\"display:block;height:100%;border-radius:4px;width:\(((.bytes*100/$max)|floor))%;background:var(--text-\(cvar(.status)))\"></span></span>"
+      + "<span style=\"width:56px;text-align:right;color:var(--text-muted);font-variant-numeric:tabular-nums\">\(.bytes) B</span></div>"
+  ')
+
+  hdr="<div style=\"display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 14px;border:0.5px solid var(--border);border-radius:12px;margin-bottom:16px;background:var(--surface-1)\"><div><div style=\"font-size:13px;color:var(--text-muted)\">~/.claude.json</div><div style=\"font-size:24px;font-weight:500\">${kb} KB</div></div><div style=\"text-align:right\"><div style=\"display:inline-block;padding:3px 9px;border-radius:8px;background:var(--bg-${bvar});color:var(--text-${bvar});font-size:12px;font-weight:500;margin-bottom:5px\">${badge}</div><div style=\"font-size:12px;color:var(--text-muted)\">${count} projects</div></div></div>"
+  secn="<div style=\"font-size:12px;color:var(--text-muted);margin-bottom:8px;font-weight:500\">largest contributors</div>"
+  moreln=""
+  [[ $more -gt 0 ]] && moreln="<div style=\"font-size:12px;color:var(--text-muted);margin-top:8px\">+ ${more} more</div>"
+  sr="<h2 style=\"position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap\">Claude Code config health: ~/.claude.json is ${kb} KB, ${badge}, ${count} projects tracked.</h2>"
+  frag="${sr}<div style=\"padding:1rem 0;max-width:560px;margin:0 auto;font-family:var(--font-sans)\">${hdr}${secn}${rows}${moreln}</div>"
+
+  /usr/bin/jq -n --arg wc "$frag" \
+    '{title:"cc-chk · config health", loading_messages:["Checking config file","Counting projects"], widget_code:$wc}'
+  exit 0
+fi
+
+file_size=$(stat -f %z "$HOME/.claude.json")
+file_size_kb=$((file_size / 1024))
+
+# Overall file status
+file_icon="✅"
+if [[ $file_size_kb -gt 100 ]]; then
+  file_icon="🚨"
+elif [[ $file_size_kb -gt 50 ]]; then
+  file_icon="⚠️ "
+fi
+
+echo "${file_icon}  Total ~/.claude.json : ${file_size_kb} KB"
+echo "---"
+
+# Per-project breakdown (by name) with health icons — from projects_json.
+projects_json | /usr/bin/jq -r '.[] | "\(.status)\t\(.name)\t\(.bytes)"' | \
+while IFS=$'\t' read -r status name size; do
+  case "$status" in
+    cleanup) icon="🚨" ;;
+    growing) icon="⚠️ " ;;
+    *)       icon="✅" ;;
+  esac
+  printf "%s  %s : %d bytes\n" "$icon" "$name" "$size"
+done

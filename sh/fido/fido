@@ -1,0 +1,531 @@
+#!/bin/bash
+# (c) Shrix
+# author: shrix
+
+# fido.sh - File Difference Tool
+# ------------------------------
+# Shows changes between directories with line counts
+# Usage: 
+#   ./fido.sh                    - Auto-detect backup vs current directory
+#   ./fido.sh dir1               - Compare dir1 vs current directory  
+#   ./fido.sh dir1 dir2          - Compare dir1 vs dir2
+#   ./fido.sh -h|--help          - Show help information
+#   ./fido.sh -r dir1 [dir2]     - Reverse comparison (current vs dir1)
+#   ./fido.sh -t "py,js,css"     - Custom file types filter
+#   ./fido.sh -v                 - Show actual diff lines instead of counts
+# 
+# Auto-detect searches: ../BACKUP/{project}/last → last_git → tmp/backup/last → tmp/backup/last_git
+
+# Ensure we operate from repo root regardless of invocation dir
+
+# Trailing gap — one blank line after this script's output, TTY only, so piped
+# or redirected output stays exactly the data. Fires on every exit path.
+_gap() { [ -t 1 ] && printf '\n'; return 0; }
+trap _gap EXIT
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# If already in a project root (skill-based invocation), use pwd instead
+if [ -d ".git" ] || [ -d "src" ] || [ -f "package.json" ] || [ -f "pyproject.toml" ]; then
+    REPO_ROOT="$(pwd)"
+fi
+PROJECT_NAME="$(basename "$REPO_ROOT")"
+cd "$REPO_ROOT" || exit
+
+# Source common project detection
+REAL_SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+source "$REAL_SCRIPT_DIR/proj-env.sh"
+
+# Default settings
+FILE_TYPES="${FILE_TYPES:-py|js|json}"
+REVERSE_MODE=0
+VERBOSE_MODE=0
+SHOW_DIFFS=0
+
+# Track if changes were found
+CHANGES_FOUND=0
+
+# Array to store files with changes (for --diffs mode)
+declare -a CHANGED_FILES=()
+declare -a CHANGED_FILES_NEW=()
+declare -a CHANGED_FILES_DELETED=()
+
+show_help() {
+    echo "fido.sh - File Difference Tool"
+    echo "=============================="
+    echo
+    echo "USAGE:"
+    echo "  ${BLUE}./fido.sh${NC}                    - Auto-detect backup vs current directory"
+    echo "  ${BLUE}./fido.sh${NC} dir1               - Compare dir1 vs current directory"
+    echo "  ${BLUE}./fido.sh${NC} dir1 dir2          - Compare dir1 vs dir2"
+    echo "  ${BLUE}./fido.sh${NC} -h|--help          - Show this help"
+    echo "  ${BLUE}./fido.sh${NC} -r dir1 [dir2]     - Reverse comparison (current vs dir1)"
+    echo "  ${BLUE}./fido.sh${NC} -t \"py, js, css\"   - Custom file types (comma-separated)"
+    echo "  ${BLUE}./fido.sh${NC} -v [args...]        - Show actual diff lines instead of counts"
+    echo "  ${BLUE}./fido.sh${NC} -d [args...]        - Show overview + paginated full diffs"
+    echo
+    echo "FLAGS:"
+    echo "  ${YELLOW}-h, --help${NC}     Show this help message"
+    echo "  ${YELLOW}-r${NC}             Reverse comparison order"
+    echo "  ${YELLOW}-t TYPES${NC}       File types to check (default: py,js,json)"
+    echo "  ${YELLOW}-v${NC}             Show actual diff lines instead of just counts"
+    echo "  ${YELLOW}-d${NC}             Show overview then paginated full diffs (recommended)"
+    echo
+    echo "EXAMPLES:"
+    echo "  ./fido.sh                              ${GREEN}# Auto-detect backup${NC}"
+    echo "  ./fido.sh -d                           ${GREEN}# Overview + paginated diffs${NC}"
+    echo "  ./fido.sh -r tmp/backup/ver115_git     ${GREEN}# Current vs backup${NC}"
+    echo "  ./fido.sh -t \"py, js, css, html\"      ${GREEN}# Custom file types${NC}"
+    echo "  ./fido.sh -t \"js\" dir1 dir2           ${GREEN}# JS-only comparison${NC}"
+    echo "  ./fido.sh -v tmp/backup/ver115_git     ${GREEN}# Show actual diff content${NC}"
+    echo
+    echo "AUTO-DETECT SEARCH ORDER:"
+    echo "  ../BACKUP/\${project}/last → ../BACKUP/\${project}/last_git"
+    echo "  → tmp/backup/last → tmp/backup/last_git"
+    exit 0
+}
+
+parse_diff() {
+    local base_dir=$1
+
+    # Clear any spinner remnants before showing output
+    printf "\r                      \r"
+
+    if [[ $SHOW_DIFFS -eq 1 ]]; then
+        # Diffs mode: collect files during overview, show diffs later
+        declare -a changes_array=()
+        declare -a files_array=()
+        max_digits=1
+
+        while IFS= read -r line; do
+            if [[ $line == Files* ]]; then
+                file1=$(echo "$line" | cut -d' ' -f2)
+                file2=$(echo "$line" | cut -d' ' -f4)
+                if [[ $file1 =~ \.(${FILE_TYPES})$ ]]; then
+                    changes=$(diff -U0 "$file1" "$file2" 2>/dev/null | tail -n +3 | grep -c '^[+-]' || echo 0)
+                    changes_array+=("$changes")
+                    files_array+=("${file1#"$base_dir"/}")
+                    # Store full paths for later diffing
+                    CHANGED_FILES+=("$file1|$file2")
+                    # Update max_digits if this number has more digits
+                    if [ ${#changes} -gt "$max_digits" ]; then
+                        max_digits=${#changes}
+                    fi
+                    CHANGES_FOUND=1
+                fi
+            elif [[ $line == Only* ]]; then
+                dir=$(echo "$line" | cut -d' ' -f3 | tr -d ':')
+                file=$(echo "$line" | cut -d' ' -f4-)
+                if [[ $file =~ \.(${FILE_TYPES})$ ]]; then
+                    if [[ $dir == $base_dir* ]]; then
+                        printf "%b-%b %s/%s\n" "$RED" "$NC" "${dir#"$base_dir"/}" "$file"
+                        CHANGED_FILES_DELETED+=("${dir#"$base_dir"/}/$file")
+                    else
+                        printf "%b+%b %s/%s\n" "$GREEN" "$NC" "${dir#*/}" "$file"
+                        CHANGED_FILES_NEW+=("${dir#*/}/$file")
+                    fi
+                    CHANGES_FOUND=1
+                fi
+            fi
+        done
+
+        # Print counts with consistent spacing
+        for i in "${!changes_array[@]}"; do
+            if [ "$max_digits" -eq 1 ]; then
+                printf "${RED}%d${NC}  %s\n" "${changes_array[$i]}" "${files_array[$i]}"
+            else
+                printf "${RED}%${max_digits}d${NC}  %s\n" "${changes_array[$i]}" "${files_array[$i]}"
+            fi
+        done
+    elif [[ $VERBOSE_MODE -eq 1 ]]; then
+        # Verbose mode: show actual diff content
+        while IFS= read -r line; do
+            if [[ $line == Files* ]]; then
+                file1=$(echo "$line" | cut -d' ' -f2)
+                file2=$(echo "$line" | cut -d' ' -f4)
+                if [[ $file1 =~ \.(${FILE_TYPES})$ ]]; then
+                    printf "\033[0;34m=== %s ===\033[0m\n" "${file1#"$base_dir"/}"
+                    # Get diff content and color it properly
+                    diff_content=$(diff -u "$file1" "$file2" 2>/dev/null | tail -n +3 | head -20)
+                    if [[ -n "$diff_content" ]]; then
+                        echo "$diff_content" | while IFS= read -r diffline; do
+                            if [[ $diffline =~ ^(\+.*) ]]; then
+                                printf "\033[0;32m%s\033[0m\n" "$diffline"
+                            elif [[ $diffline =~ ^(-.*) ]]; then
+                                printf "\033[0;31m%s\033[0m\n" "$diffline"
+                            else
+                                printf "%s\n" "$diffline"
+                            fi
+                        done
+                    fi
+                    printf "\n"
+                    CHANGES_FOUND=1
+                fi
+            elif [[ $line == Only* ]]; then
+                dir=$(echo "$line" | cut -d' ' -f3 | tr -d ':')
+                file=$(echo "$line" | cut -d' ' -f4-)
+                if [[ $file =~ \.(${FILE_TYPES})$ ]]; then
+                    if [[ $dir == $base_dir* ]]; then
+                        printf "%b- %s/%s%b (deleted)\n" "$RED" "${dir#"$base_dir"/}" "$file" "$NC"
+                    else
+                        printf "%b+ %s/%s%b (new)\n" "$GREEN" "${dir#*/}" "$file" "$NC"
+                    fi
+                    CHANGES_FOUND=1
+                fi
+            fi
+        done
+    else
+        # Normal mode: show counts as before
+        declare -a changes_array=()
+        declare -a files_array=()
+        max_digits=1
+        
+        while IFS= read -r line; do
+            if [[ $line == Files* ]]; then
+                file1=$(echo "$line" | cut -d' ' -f2)
+                file2=$(echo "$line" | cut -d' ' -f4)
+                if [[ $file1 =~ \.(${FILE_TYPES})$ ]]; then
+                    changes=$(diff -U0 "$file1" "$file2" 2>/dev/null | tail -n +3 | grep -c '^[+-]' || echo 0)
+                    changes_array+=("$changes")
+                    files_array+=("${file1#"$base_dir"/}")
+                    # Update max_digits if this number has more digits
+                    if [ ${#changes} -gt "$max_digits" ]; then
+                        max_digits=${#changes}
+                    fi
+                    CHANGES_FOUND=1
+                fi
+            elif [[ $line == Only* ]]; then
+                dir=$(echo "$line" | cut -d' ' -f3 | tr -d ':')
+                file=$(echo "$line" | cut -d' ' -f4-)
+                if [[ $file =~ \.(${FILE_TYPES})$ ]]; then
+                    if [[ $dir == $base_dir* ]]; then
+                        printf "%b-%b %s/%s\n" "$RED" "$NC" "${dir#"$base_dir"/}" "$file"
+                    else
+                        printf "%b+%b %s/%s\n" "$GREEN" "$NC" "${dir#*/}" "$file"
+                    fi
+                    CHANGES_FOUND=1
+                fi
+            fi
+        done
+
+        # Print counts with consistent spacing
+        for i in "${!changes_array[@]}"; do
+            if [ "$max_digits" -eq 1 ]; then
+                printf "${RED}%d${NC}  %s\n" "${changes_array[$i]}" "${files_array[$i]}"
+            else
+                printf "${RED}%${max_digits}d${NC}  %s\n" "${changes_array[$i]}" "${files_array[$i]}"
+            fi
+        done
+    fi
+}
+
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -h|--help)
+            show_help
+            ;;
+        -r|--reverse)
+            REVERSE_MODE=1
+            shift
+            ;;
+        -t|--types)
+            if [[ -n $2 ]] && [[ $2 != -* ]]; then
+                # Convert comma-separated to pipe-separated for regex
+                # Remove spaces around commas and convert to pipe-separated
+                FILE_TYPES=$(echo "$2" | sed 's/[[:space:]]*,[[:space:]]*/|/g')
+                shift 2
+            else
+                echo "Error: -t requires file types argument (e.g., -t \"py, js, css\")"
+                exit 1
+            fi
+            ;;
+        -v|--verbose)
+            VERBOSE_MODE=1
+            shift
+            ;;
+        -d|--diffs)
+            SHOW_DIFFS=1
+            shift
+            ;;
+        -*)
+            echo "Unknown option: $1"
+            echo "Use -h or --help for usage information"
+            exit 1
+            ;;
+        *)
+            # Non-flag arguments - directories
+            if [[ -z $dir1 ]]; then
+                dir1="$1"
+            elif [[ -z $dir2 ]]; then
+                dir2="$1"
+            else
+                echo "Error: Too many directory arguments"
+                exit 1
+            fi
+            shift
+            ;;
+    esac
+done
+
+# Set directories to compare based on provided arguments and flags
+if [[ -n $dir1 && -n $dir2 ]]; then
+    # Two directories specified
+    : # dir1 and dir2 already set
+elif [[ -n $dir1 ]]; then
+    # One directory specified: compare it vs current directory
+    dir2="."
+else
+    # No directories specified: auto-detect backup vs current directory
+    PROJECT_NAME=$(basename "$(pwd)")
+    BACKUP_BASE="../BACKUP/${PROJECT_NAME}"
+    
+    dir2="."
+    if [ -d "${BACKUP_BASE}/last" ]; then
+        dir1="${BACKUP_BASE}/last"
+    elif [ -d "${BACKUP_BASE}/last_git" ]; then
+        dir1="${BACKUP_BASE}/last_git"
+    elif [ -d "tmp/backup/last" ]; then
+        dir1="tmp/backup/last"
+    elif [ -d "tmp/backup/last_git" ]; then
+        dir1="tmp/backup/last_git"
+    else
+        echo "No backup found in ${BACKUP_BASE}/last, ${BACKUP_BASE}/last_git, tmp/backup/last, or tmp/backup/last_git"
+        exit 1
+    fi
+fi
+
+# Apply reverse mode if requested
+if [[ $REVERSE_MODE -eq 1 ]]; then
+    temp_dir="$dir1"
+    dir1="$dir2"
+    dir2="$temp_dir"
+fi
+
+# Check directories exist
+if [ ! -d "$dir1" ] || [ ! -d "$dir2" ]; then
+    echo "Error: Both directories must exist"
+    echo "dir1: $dir1"
+    echo "dir2: $dir2"
+    exit 1
+fi
+
+# Spinner animation function
+show_spinner() {
+    local marker_file=$1
+    local build_delay=1.2
+    local blink_delay=0.15
+    local spinstr='................'
+
+    # Build up dots one by one (1 to 16) - slowly
+    for i in {1..16}; do
+        if [ -f "$marker_file" ]; then
+            printf "\r                      \r"
+            return
+        fi
+        printf "\r  %s" "${spinstr:0:$i}"
+        sleep "$build_delay"
+    done
+
+    # Now blink through them continuously until done
+    while [ ! -f "$marker_file" ]; do
+        for i in {0..15}; do
+            if [ -f "$marker_file" ]; then
+                break 2
+            fi
+            # Create blinking effect by highlighting current dot
+            local before="${spinstr:0:$i}"
+            local after="${spinstr:$((i+1))}"
+            printf "\r  %s•%s" "$before" "$after"
+            sleep "$blink_delay"
+            printf "\r  %s" "$spinstr"
+            sleep "$blink_delay"
+        done
+    done
+
+    # Clear the spinner line completely with enough spaces
+    printf "\r                      \r"
+}
+
+# Unified streaming processor
+temp_dir="/tmp/fido_$$"
+mkdir -p "$temp_dir"
+done_marker="$temp_dir/done"
+found_marker="$temp_dir/found"
+
+if [[ $SHOW_DIFFS -eq 1 ]]; then
+    # DIFFS MODE: Save files for interactive viewing
+    queue_dir="$temp_dir/queue"
+    mkdir -p "$queue_dir"
+
+    # Background: Process and save diffs
+    (
+        file_counter=0
+        diff -qr "$dir1" "$dir2" 2>/dev/null | while IFS= read -r line; do
+            if [[ $line == Files* ]]; then
+                file1=$(echo "$line" | cut -d' ' -f2)
+                file2=$(echo "$line" | cut -d' ' -f4)
+
+                if [[ $file1 =~ \.(${FILE_TYPES})$ ]]; then
+                    filename="${file1#"$dir1"/}"
+                    changes=$(diff -U0 "$file1" "$file2" 2>/dev/null | tail -n +3 | grep -c '^[+-]' || echo 0)
+
+                    # Save metadata
+                    echo "$changes|$filename" > "$queue_dir/$(printf "%04d" $file_counter).meta"
+
+                    # Generate colored diff
+                    diff_file="$queue_dir/$(printf "%04d" $file_counter).diff"
+                    echo -e "${CYAN}>>> $filename${NC}\n" > "$diff_file"
+                    diff -u "$file1" "$file2" 2>/dev/null | sed \
+                        -e "s/^+\(.*\)/$(printf '\033[0;32m')+\1$(printf '\033[0m')/" \
+                        -e "s/^-\(.*\)/$(printf '\033[0;31m')-\1$(printf '\033[0m')/" \
+                        -e "s/^@\(.*\)@/$(printf '\033[0;36m')@\1@$(printf '\033[0m')/" \
+                        >> "$diff_file"
+
+                    touch "$found_marker"
+                    file_counter=$((file_counter + 1))
+                fi
+            elif [[ $line == Only* ]]; then
+                dir=$(echo "$line" | cut -d' ' -f3 | tr -d ':')
+                file=$(echo "$line" | cut -d' ' -f4-)
+                if [[ $file =~ \.(${FILE_TYPES})$ ]]; then
+                    # Save as special marker for new/deleted files
+                    if [[ $dir == $dir1* ]]; then
+                        echo "0|-${file}" > "$queue_dir/$(printf "%04d" $file_counter).meta"
+                    else
+                        echo "0|+${file}" > "$queue_dir/$(printf "%04d" $file_counter).meta"
+                    fi
+                    touch "$found_marker"
+                    file_counter=$((file_counter + 1))
+                fi
+            fi
+        done
+        touch "$done_marker"
+    ) &
+
+    background_pid=$!
+
+    # Foreground: Show diffs interactively
+    file_index=0
+    total_lines=0
+    total_files=0
+    while true; do
+        meta_file="$queue_dir/$(printf "%04d" $file_index).meta"
+        diff_file="$queue_dir/$(printf "%04d" $file_index).diff"
+
+        # Wait for next file
+        while [ ! -f "$meta_file" ]; do
+            if [ -f "$done_marker" ]; then
+                break 2
+            fi
+            sleep 0.05
+        done
+
+        if [ -f "$meta_file" ]; then
+            IFS='|' read -r changes filename < "$meta_file"
+
+            # Display line count
+            if [[ $filename == -* ]] || [[ $filename == +* ]]; then
+                printf "${RED}%s${NC} %s\n" "${filename:0:1}" "${filename:1}"
+            elif [ "$changes" -lt 10 ]; then
+                printf "${RED}%d${NC}  %s\n" "$changes" "$filename"
+            else
+                printf "${RED}%d${NC} %s\n" "$changes" "$filename"
+            fi
+
+            # Accumulate totals
+            total_lines=$((total_lines + changes))
+            total_files=$((total_files + 1))
+
+            # Show diff if it exists
+            if [ -f "$diff_file" ] && [ -s "$diff_file" ]; then
+                less -RK -P"(END)" "$diff_file"
+            fi
+
+            file_index=$((file_index + 1))
+        fi
+    done
+
+    wait "$background_pid" 2>/dev/null
+
+    # Show summary
+    if [ $total_files -gt 0 ]; then
+        echo
+        printf "${RED}%d${NC} lines in %d files.\n" "$total_lines" "$total_files"
+    fi
+
+else
+    # DEFAULT MODE: Direct streaming output
+    totals_file="$temp_dir/totals"
+    echo "0 0" > "$totals_file"  # Initialize: lines files
+
+    (
+        diff -qr "$dir1" "$dir2" 2>/dev/null | while IFS= read -r line; do
+            if [[ $line == Files* ]]; then
+                file1=$(echo "$line" | cut -d' ' -f2)
+                file2=$(echo "$line" | cut -d' ' -f4)
+
+                if [[ $file1 =~ \.(${FILE_TYPES})$ ]]; then
+                    filename="${file1#"$dir1"/}"
+                    changes=$(diff -U0 "$file1" "$file2" 2>/dev/null | tail -n +3 | grep -c '^[+-]' || echo 0)
+
+                    if [ "$changes" -lt 10 ]; then
+                        printf "${RED}%d${NC}  %s\n" "$changes" "$filename"
+                    else
+                        printf "${RED}%d${NC} %s\n" "$changes" "$filename"
+                    fi
+
+                    # Update totals file (inside while loop to avoid subshell issue)
+                    read -r total_lines total_files < "$totals_file"
+                    echo "$((total_lines + changes)) $((total_files + 1))" > "$totals_file"
+
+                    touch "$found_marker"
+                fi
+            elif [[ $line == Only* ]]; then
+                dir=$(echo "$line" | cut -d' ' -f3 | tr -d ':')
+                file=$(echo "$line" | cut -d' ' -f4-)
+                if [[ $file =~ \.(${FILE_TYPES})$ ]]; then
+                    if [[ $dir == $dir1* ]]; then
+                        printf "%b-%b %s/%s\n" "$RED" "$NC" "${dir#"$dir1"/}" "$file"
+                    else
+                        printf "%b+%b %s/%s\n" "$GREEN" "$NC" "${dir#*/}" "$file"
+                    fi
+
+                    # Update file count
+                    read -r total_lines total_files < "$totals_file"
+                    echo "$total_lines $((total_files + 1))" > "$totals_file"
+
+                    touch "$found_marker"
+                fi
+            fi
+        done
+
+        touch "$done_marker"
+    ) &
+
+    background_pid=$!
+    wait "$background_pid" 2>/dev/null
+
+    # Show summary
+    if [ -f "$totals_file" ]; then
+        read -r total_lines total_files < "$totals_file"
+        if [ "$total_files" -gt 0 ]; then
+            echo
+            printf "${RED}%d${NC} lines in %d files.\n" "$total_lines" "$total_files"
+        fi
+    fi
+fi
+
+# Check if we found any changes
+if [ -f "$found_marker" ]; then
+    CHANGES_FOUND=1
+fi
+
+# Cleanup
+rm -rf "$temp_dir"
+
+# Exit with appropriate code
+if [ $CHANGES_FOUND -eq 1 ]; then
+    exit 0
+else
+    exit 1
+fi 

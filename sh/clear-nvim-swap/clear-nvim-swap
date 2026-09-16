@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# (c) Shrix
+# author: shrix
+# clear-nvim-swap — remove Neovim swap files from the swap dir.
+# Safe by design: refuses to run while nvim is open (live swaps must
+# not be deleted), and supports a dry run. Clears stale swaps that
+# trigger the "W325: Ignoring swapfile" warning.
+#
+#   clear-nvim-swap                 delete stale swap files
+#   clear-nvim-swap -n | --dry-run  list what would go, delete nothing
+#   clear-nvim-swap -f | --force    delete even while nvim runs (risky)
+#   clear-nvim-swap -h | --help     this help
+set -euo pipefail
+
+# Trailing gap — one blank line after this script's output, TTY only, so piped
+# or redirected output stays exactly the data. Fires on every exit path.
+_gap() { [ -t 1 ] && printf '\n'; return 0; }
+trap _gap EXIT
+
+# Colours + the `status` closing line (TTY-guarded).
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/proj-env.sh"
+
+SWAP_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/nvim/swap"
+
+dry_run=false
+force=false
+for arg in "$@"; do
+  case "$arg" in
+    -n|--dry-run) dry_run=true ;;
+    -f|--force)   force=true ;;
+    -h|--help)
+      cat <<EOF
+Usage: clear-nvim-swap [-n|--dry-run] [-f|--force]
+
+  Removes Neovim swap files in:
+    $SWAP_DIR
+
+  -n, --dry-run   List what would be removed, delete nothing.
+  -f, --force     Delete even if nvim is running (NOT recommended —
+                  a running nvim's swap is live crash-recovery data).
+  -h, --help      Show this help.
+
+By default it aborts if any nvim process is running.
+EOF
+      exit 0 ;;
+    *) echo "clear-nvim-swap: unknown arg '$arg' (see --help)" >&2; exit 2 ;;
+  esac
+done
+
+if [[ ! -d "$SWAP_DIR" ]]; then
+  status warn "no swap dir at $SWAP_DIR — nothing to do"
+  exit 0
+fi
+
+shopt -s nullglob
+files=("$SWAP_DIR"/*.sw[a-p])
+shopt -u nullglob
+
+if (( ${#files[@]} == 0 )); then
+  status warn "no swap files in $SWAP_DIR — already clean"
+  exit 0
+fi
+
+echo "Swap files in $SWAP_DIR (${#files[@]}):"
+for f in "${files[@]}"; do
+  echo "  - $(basename "$f")"
+done
+
+# Preview mode deletes nothing, so it is always safe — check it first.
+if [[ "$dry_run" == true ]]; then
+  status warn "dry run — nothing deleted; drop -n to remove them"
+  exit 0
+fi
+
+# Actual deletion: never remove a live swap out from under a running nvim.
+# Name the PIDs, their STATE and their file rather than just "nvim is running".
+# A `T` (suspended, Ctrl-Z'd) nvim has no visible window, so a bare warning
+# sends the user hunting for a tab that isn't there — measured 19Aug26.
+if pids=$(pgrep -x nvim 2>/dev/null) && [[ -n "$pids" ]] && [[ "$force" == false ]]; then
+  status warn "nvim is running — its swap files are live crash-recovery data"
+  # shellcheck disable=SC2086
+  ps -o pid=,stat=,args= -p $(echo "$pids" | tr '\n' ',' | sed 's/,$//') 2>/dev/null |
+    while read -r pid stat args; do
+      case "$stat" in
+        T*) note="suspended (Ctrl-Z) — resume with 'fg' in its own terminal tab" ;;
+        *)  note="active" ;;
+      esac
+      printf '    %-7s %-5s %s\n            └─ %s\n' "$pid" "$stat" "${args:0:52}" "$note"
+    done
+  printf '\n    Save and quit those, then re-run. --force overrides (may lose\n'
+  printf '    unsaved buffers).\n\n'
+  exit 1
+fi
+
+rm -f -- "${files[@]}"
+status ok "removed ${#files[@]} swap file(s) from $SWAP_DIR"

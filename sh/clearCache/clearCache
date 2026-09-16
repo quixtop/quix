@@ -1,0 +1,298 @@
+#!/usr/bin/env bash
+# (c) Shrix
+# author: shrix
+# clearCache — reclaim disk by deleting app CACHES only. Never touches data.
+#
+# Usage:
+#   clearCache                   Guided walkthrough — scans, shows sizes, asks.
+#   clearCache <App>             Clear one app's caches (preview, then [y/N]).
+#   clearCache all               Every closed app's caches (preview, then [y/N]).
+#   clearCache -n | --dry-run    Report only; change nothing. Combine with any of the above.
+#   clearCache -f | --force      Skip the prompt.
+#   clearCache -h | --help       Show this help.
+#
+# Examples:
+#   clearCache                   First time? Start here.
+#   clearCache Arc               Preview Arc's caches, prompt before deleting.
+#   clearCache all -n            See total reclaimable across every closed app.
+#   clearCache Spotify -f        Clear Spotify without prompting.
+#
+# What counts as CACHE (removed):
+#   ~/Library/Caches/<app>                     HTTP / asset cache
+#   .../Cache, Code Cache, GPUCache            renderer + compiled-JS caches
+#   .../DawnGraphiteCache, DawnWebGPUCache     shader caches
+#   .../Service Worker/CacheStorage|ScriptCache  site offline assets
+#   .../component_crx_cache, extensions_crx_cache  extension INSTALLERS
+#   .../CachedExtensionVSIXs                   VS Code-family extension installers
+#   .../OptGuideOnDeviceModel*                 re-downloadable ML models
+#
+# What is NEVER touched (data):
+#   History · Bookmarks · Cookies · Login Data (saved passwords) · Web Data
+#   Local Storage · IndexedDB · Extensions · Preferences · Session Storage
+#   Service Worker/Database (registration index — deleting deregisters workers)
+#   Anything under /System, /Library, or a com.apple.* container
+#
+# Safety:
+#   - SKIPS any app that is running. Detection uses `ps -Ao comm=` (the
+#     executable name), NOT `pgrep -f` — the latter also searches each
+#     process's ENVIRONMENT block, so an unrelated process carrying a long
+#     PATH will match an app name and produce a false "running".
+#   - Dry-run preview with sizes before anything is deleted, unless -f.
+#   - Only ever removes paths whose basename is on the cache list above.
+set -u
+
+# Trailing gap — one blank line after this script's output, TTY only, so piped
+# or redirected output stays exactly the data. Fires on every exit path.
+_gap() { [ -t 1 ] && printf '\n'; return 0; }
+trap _gap EXIT
+
+# Colours + the `status` closing line (TTY-guarded). See code-quality rule
+# § Script Output Contract.
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/proj-env.sh"
+
+DRY=0; FORCE=0; TARGET=""
+A="$HOME/Library/Application Support"
+C="$HOME/Library/Caches"
+
+show_help() { awk 'NR==1 { next } /^# \(c\)/ { next } /^# author:/ { next } /^#/ { sub(/^# ?/,""); print; next } { exit }' "$0"; }
+
+# Cache directory basenames, relative to an app's Application Support root.
+CACHE_DIRS=(
+  "Cache" "Code Cache" "GPUCache" "DawnGraphiteCache" "DawnWebGPUCache"
+  "GrShaderCache" "ShaderCache" "CachedExtensionVSIXs" "PersistentCache"
+  "component_crx_cache" "extensions_crx_cache"
+  "OptGuideOnDeviceModel" "OptGuideOnDeviceClassifierModel"
+  "Service Worker/CacheStorage" "Service Worker/ScriptCache"
+  "Default/Cache" "Default/Code Cache" "Default/GPUCache"
+  "Default/DawnGraphiteCache" "Default/DawnWebGPUCache"
+  "Default/Service Worker/CacheStorage" "Default/Service Worker/ScriptCache"
+  "User Data/Default/Cache" "User Data/Default/Code Cache"
+  "User Data/Default/GPUCache" "User Data/Default/DawnGraphiteCache"
+  "User Data/Default/DawnWebGPUCache"
+  "User Data/Default/Service Worker/CacheStorage"
+  "User Data/Default/Service Worker/ScriptCache"
+  "User Data/OptGuideOnDeviceModel" "User Data/OptGuideOnDeviceClassifierModel"
+  "User Data/component_crx_cache" "User Data/extensions_crx_cache"
+)
+
+hsize() { du -sh "$1" 2>/dev/null | awk '{print $1}'; }
+ksize() { du -sk "$1" 2>/dev/null | awk '{print $1+0}'; }
+
+# ─── App resolution — same four locations and bundle-ID lookup as rmApp ─────
+# A user types the APP name ("Brave Browser"); its support folder is often
+# something else ("BraveSoftware"). Resolve via the bundle, then fall back to
+# a case-insensitive folder match, so both spellings work.
+APP_PATH=""; BID=""
+resolve_app() {
+  local n="$1" d
+  for d in "/Applications" "$HOME/Applications" "/Applications/Setapp" "/Applications/Utilities"; do
+    [ -d "$d/$n.app" ] && { APP_PATH="$d/$n.app"; break; }
+  done
+  [ -n "$APP_PATH" ] && \
+    BID=$(defaults read "$APP_PATH/Contents/Info" CFBundleIdentifier 2>/dev/null | tr -d '\n')
+}
+
+# Support-folder name(s) for a typed app name. Echoes one per line.
+support_dirs_for() {
+  local n="$1" vendor
+  [ -d "$A/$n" ] && echo "$n"
+  # exact-case-insensitive folder match
+  for d in "$A"/*/; do
+    [ "$(basename "$d")" = "$n" ] && continue
+    [ "$(echo "$(basename "$d")" | tr 'A-Z' 'a-z')" = "$(echo "$n" | tr 'A-Z' 'a-z')" ] && echo "$(basename "$d")"
+  done
+  # vendor folder implied by the bundle ID (com.brave.Browser -> Brave*)
+  if [ -n "$BID" ]; then
+    vendor=$(echo "$BID" | cut -d. -f2)
+    for d in "$A"/*/; do
+      case "$(echo "$(basename "$d")" | tr 'A-Z' 'a-z')" in
+        "$(echo "$vendor" | tr 'A-Z' 'a-z')"*) echo "$(basename "$d")";;
+      esac
+    done
+  fi
+}
+
+# ─── Running detection ──────────────────────────────────────────────────────
+# The support FOLDER often differs from the EXECUTABLE (BraveSoftware vs
+# "Brave Browser"; Code vs "Electron"), so a comm=-only check misses running
+# apps — the one direction that must never fail. Three signals, any → running:
+#   1. comm basename == folder name              (Arc, Spotify, Dia)
+#   2. any process args reference
+#      "Application Support/<folder>"            (Electron --user-data-dir,
+#                                                 Chromium helpers)
+#   3. a running /Applications/<App>.app whose NAME starts with the folder
+#      word ("Google Chrome" → folder Google)
+# False positives only cause a SKIP — the safe direction. Snapshot once.
+RUN_COMMS=""; RUN_ARGS=""; RUN_BUNDLES=""
+snapshot_running() {
+  RUN_COMMS=$(ps -Ao comm= 2>/dev/null | sed 's|.*/||' | sort -u)
+  RUN_ARGS=$(ps -Axo args= 2>/dev/null)
+  RUN_BUNDLES=$(printf '%s\n' "$RUN_ARGS" \
+    | grep -oE '/Applications/[^/]+\.app' | sed 's|.*/||; s|\.app$||' | sort -u)
+}
+is_running() {
+  local n="$1" lcn b
+  [ -z "$RUN_COMMS" ] && snapshot_running
+  printf '%s\n' "$RUN_COMMS" | grep -qix "$n" && return 0
+  printf '%s\n' "$RUN_ARGS" | grep -qiF "Application Support/$n" && return 0
+  lcn=$(echo "$n" | tr 'A-Z' 'a-z')
+  while IFS= read -r b; do
+    [ -n "$b" ] || continue
+    case "$(echo "$b" | tr 'A-Z' 'a-z')" in
+      "$lcn"|"$lcn "*) return 0;;
+    esac
+  done <<< "$RUN_BUNDLES"
+  return 1
+}
+
+# Echo every cache path for one app, one per line.
+paths_for() {
+  local app="$1" p
+  [ -d "$C/$app" ] && echo "$C/$app"
+  for d in "${CACHE_DIRS[@]}"; do
+    p="$A/$app/$d"
+    [ -e "$p" ] && echo "$p"
+  done
+}
+
+# List candidate app names (anything with at least one cache dir).
+candidates() {
+  local n
+  for d in "$A"/*/; do
+    n=$(basename "$d")
+    case "$n" in com.apple.*|Caches) continue;; esac
+    [ -n "$(paths_for "$n")" ] && echo "$n"
+  done
+}
+
+# Preview + optionally delete. $1=app  -> prints total KB reclaimed to stdout tail
+process_app() {
+  local app="$1" total=0 s k any=0
+  if is_running "$app"; then
+    printf "  %-24s %s\n" "$app" "SKIPPED — running"
+    return 0
+  fi
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    k=$(ksize "$p"); [ "${k:-0}" -eq 0 ] && continue
+    any=1; total=$((total + k))
+    s=$(hsize "$p")
+    if [ "$DRY" -eq 1 ]; then
+      printf "    would clear %-46s %s\n" "${p#"$HOME"/Library/}" "$s"
+    else
+      rm -rf "$p" && printf "    cleared     %-46s %s\n" "${p#"$HOME"/Library/}" "$s"
+    fi
+  done < <(paths_for "$app")
+  [ "$any" -eq 0 ] && { printf "  %-24s no caches\n" "$app"; return 0; }
+  printf "  %-24s %6.2f GB\n" "$app" "$(echo "scale=2;$total/1048576" | bc)"
+}
+
+confirm() {
+  [ "$FORCE" -eq 1 ] && return 0
+  [ "$DRY" -eq 1 ] && return 1
+  local a=""
+  printf "\nProceed? [y/N] "
+  read -r a </dev/tty 2>/dev/null || { echo "(no tty — aborting; use -f to force)"; return 1; }
+  case "$a" in y|Y|yes) return 0;; *) echo "Aborted."; return 1;; esac
+}
+
+# ─── Args ───────────────────────────────────────────────────────────────────
+for a in "$@"; do
+  case "$a" in
+    -h|--help|help) show_help; exit 0;;
+    -n|--dry-run|dry-run) DRY=1;;
+    -f|--force|force) FORCE=1;;
+    -*) echo "clearCache: unknown option $a (try --help)" >&2; exit 1;;
+    *) TARGET="$a";;
+  esac
+done
+
+# ─── Guided mode (no args) ──────────────────────────────────────────────────
+if [ -z "$TARGET" ]; then
+  echo "clearCache — removes app CACHES only, never your data."
+  echo "Running apps are skipped automatically."
+  echo
+  echo "Scanning…"
+  echo
+  # Summary only — one line per app, largest first. process_app is per-path
+  # verbose by design, so here we total the sizes ourselves.
+  tmp=$(mktemp); total=0
+  while IFS= read -r app; do
+    [ -n "$app" ] || continue
+    if is_running "$app"; then
+      printf "%12d|  %-26s %s\n" 0 "$app" "skipped — running" >> "$tmp"; continue
+    fi
+    sum=0
+    while IFS= read -r p; do
+      [ -n "$p" ] || continue
+      k=$(ksize "$p"); sum=$((sum + k))
+    done < <(paths_for "$app")
+    [ "$sum" -lt 1024 ] && continue
+    total=$((total + sum))
+    printf "%12d|  %-26s %6.2f GB\n" "$sum" "$app" "$(echo "scale=2;$sum/1048576" | bc)" >> "$tmp"
+  done < <(candidates)
+
+  if [ ! -s "$tmp" ]; then rm -f "$tmp"; echo "  nothing to clear."; exit 0; fi
+  sort -rn -t'|' -k1 "$tmp" | cut -d'|' -f2-
+  rm -f "$tmp"
+  printf "\n  %-26s %6.2f GB reclaimable\n" "TOTAL" "$(echo "scale=2;$total/1048576" | bc)"
+  echo
+  echo "Next:"
+  echo "  clearCache <App>   clear one       (e.g. clearCache Spotify)"
+  echo "  clearCache all     clear every closed app"
+  echo "  clearCache <App> -n  preview without deleting"
+  echo "  clearCache --help  full detail on what is and is not removed"
+  exit 0
+fi
+
+# ─── all ────────────────────────────────────────────────────────────────────
+if [ "$TARGET" = "all" ] || [ "$TARGET" = "All" ] || [ "$TARGET" = "ALL" ]; then
+  echo "Scanning every app (running ones are skipped)…"
+  saved=$DRY; DRY=1
+  list=$(while IFS= read -r app; do process_app "$app" 2>/dev/null; done < <(candidates))
+  echo "$list"
+  DRY=$saved
+  [ "$DRY" -eq 1 ] && exit 0
+  confirm || exit 0
+  echo
+  while IFS= read -r app; do process_app "$app" 2>/dev/null; done < <(candidates)
+  exit 0
+fi
+
+# ─── single app ─────────────────────────────────────────────────────────────
+resolve_app "$TARGET"
+DIRS=$(support_dirs_for "$TARGET" | sort -u)
+[ -d "$C/$TARGET" ] && [ -z "$DIRS" ] && DIRS="$TARGET"
+
+if [ -z "$DIRS" ]; then
+  echo "clearCache: no cache folders found for '$TARGET'." >&2
+  [ -n "$APP_PATH" ] && echo "  (found $APP_PATH — but it keeps no caches)" >&2
+  echo "Apps with caches right now:" >&2
+  candidates | sed 's/^/  /' >&2
+  exit 1
+fi
+
+# Strongest signal in single-app mode: the resolved bundle itself is live.
+if [ -n "$APP_PATH" ]; then
+  snapshot_running
+  if printf '%s\n' "$RUN_ARGS" | grep -qiF "$APP_PATH/"; then
+    echo "clearCache: $TARGET is RUNNING — quit it first." >&2
+    exit 1
+  fi
+fi
+
+[ -n "$APP_PATH" ] && echo "App:     $APP_PATH${BID:+  ($BID)}"
+echo "Folders: $(echo "$DIRS" | tr '\n' ' ')"
+echo
+saved=$DRY; DRY=1
+echo "Preview:"
+while IFS= read -r d; do [ -n "$d" ] && process_app "$d" 2>/dev/null; done <<< "$DIRS"
+DRY=$saved
+if [ "$DRY" -eq 1 ]; then
+  status warn "dry run — nothing deleted; drop -n to clear"
+  exit 0
+fi
+confirm || { status warn "cancelled — nothing deleted"; exit 0; }
+echo
+while IFS= read -r d; do [ -n "$d" ] && process_app "$d" 2>/dev/null; done <<< "$DIRS"
+status ok "caches cleared for ${APP:-the selected app}"

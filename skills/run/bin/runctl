@@ -1,0 +1,601 @@
+#!/usr/bin/env python3
+"""runctl — register scripts in ~/.agents/skills/run/ as Claude Code slash commands.
+
+Subcommands: register, unregister, rename, list, exec, help.
+
+register is the only path that writes into ~/.claude/commands/. All mutations
+go through here; SKILL.md's dispatch body routes /run invocations to this CLI
+via bash.
+"""
+
+import argparse
+import os
+import re
+import shutil
+import sys
+import textwrap
+from datetime import datetime
+from pathlib import Path
+
+HOME = Path.home()
+SKILL_DIR = HOME / ".agents" / "skills" / "run"
+SCRIPTS_DIR = SKILL_DIR / "scripts"
+TRASH_DIR = SCRIPTS_DIR / ".trash"
+COMMANDS_DIR = HOME / ".claude" / "commands"
+
+RESERVED_NAMES = {"run", "help"}
+VALID_NAME = re.compile(r"^[a-zA-Z0-9_\-]+$")
+
+INTERACTIVE_PATTERNS = [
+    re.compile(r"\bread\s[^\n]*-p\b"),
+    re.compile(r"\bread\s[^\n]*-s\b"),
+    re.compile(r"\bselect\s+\w+\s+in\b"),
+    re.compile(r"/dev/tty"),
+]
+
+
+def _colors():
+    if sys.stdout.isatty():
+        return dict(g="\033[32m", y="\033[33m", r="\033[31m",
+                    d="\033[2m", b="\033[1m", c="\033[36m", n="\033[0m")
+    return {k: "" for k in "gyrdbcn"}
+
+
+C = _colors()
+
+
+def err(msg, code=1):
+    print(f"{C['r']}error:{C['n']} {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def warn(msg):
+    print(f"{C['y']}warning:{C['n']} {msg}", file=sys.stderr)
+
+
+def ok(msg):
+    print(f"{C['g']}{C['b']}●{C['n']} {msg}")
+
+
+def ensure_dirs():
+    SCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
+    COMMANDS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def resolve_source(raw):
+    p = Path(raw).expanduser()
+    if not p.is_absolute() and "/" not in raw:
+        candidate = Path.cwd() / raw
+        if candidate.is_file():
+            return candidate.resolve()
+    if not p.is_absolute():
+        p = Path.cwd() / p
+    return p.resolve()
+
+
+def has_shebang(path):
+    try:
+        with path.open("rb") as f:
+            return f.readline().startswith(b"#!")
+    except OSError:
+        return False
+
+
+def _interpreter(path):
+    """The interpreter token from a script's shebang (e.g. 'bash', 'python3'),
+    or None. Handles both '#!/bin/bash' and '#!/usr/bin/env python3'."""
+    try:
+        first = path.open("r", errors="replace").readline().strip()
+    except OSError:
+        return None
+    if not first.startswith("#!"):
+        return None
+    parts = first[2:].strip().split()
+    if not parts:
+        return None
+    exe = parts[0].rsplit("/", 1)[-1]
+    if exe == "env" and len(parts) > 1:
+        exe = parts[1].rsplit("/", 1)[-1]
+    return exe or None
+
+
+def _run_prefix(script_path):
+    """How a slash command should invoke the script, honouring its shebang:
+    'bash <p>' for sh/bash (unchanged historical behaviour), 'python3 <p>' for
+    python, else '<p>' (direct exec via shebang + exec bit). Without this,
+    runctl would force `bash` on every script and mangle python ones."""
+    interp = _interpreter(script_path)
+    if interp in ("bash", "sh"):
+        return f"bash {script_path}"
+    if interp and interp.startswith("python"):
+        return f"python3 {script_path}"
+    return str(script_path)
+
+
+def extract_description(path):
+    """First non-blank line after the shebang that starts with '#' → description."""
+    try:
+        lines = path.read_text(errors="replace").splitlines()
+    except OSError:
+        return None
+    for line in lines[1:20]:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("#"):
+            desc = stripped.lstrip("#").lstrip()
+            return desc or None
+        return None
+    return None
+
+
+def check_interactive(path):
+    hits = []
+    try:
+        with path.open("r", errors="replace") as f:
+            for i, line in enumerate(f):
+                if i >= 200:
+                    break
+                for pat in INTERACTIVE_PATTERNS:
+                    if pat.search(line):
+                        hits.append(line.strip())
+                        break
+    except OSError:
+        pass
+    return hits
+
+
+def timestamp():
+    return datetime.now().strftime("%Y-%m-%d_%H%M%S")
+
+
+def command_path(name):
+    return COMMANDS_DIR / f"{name}.md"
+
+
+def read_command_metadata(name):
+    """Parse simple YAML frontmatter from ~/.claude/commands/<name>.md.
+
+    Returns a dict of string keys → values, or None if the file is missing or
+    has no frontmatter. Only handles single-line scalar fields, which is all
+    our template produces.
+    """
+    p = command_path(name)
+    if not p.is_file():
+        return None
+    text = p.read_text()
+    if not text.startswith("---\n"):
+        return None
+    end = text.find("\n---", 4)
+    if end < 0:
+        return None
+    meta = {}
+    for line in text[4:end].splitlines():
+        if ":" in line:
+            k, _, v = line.partition(":")
+            meta[k.strip()] = v.strip()
+    return meta
+
+
+def write_command_file(name, script_filename, desc, extras=None,
+                       model=None, effort="low", widget=False, browser=False):
+    script_path = SCRIPTS_DIR / script_filename
+    run = _run_prefix(script_path)
+    # Flatten any newlines so a --desc/--extras or extracted comment can't break
+    # the YAML frontmatter and inject fields (e.g., 'allowed-tools: Bash,Write').
+    # Assembled as explicit lines (not a dedent f-string) so the optional
+    # multi-line extras block can't corrupt textwrap.dedent's indentation logic.
+    desc = " ".join(desc.splitlines()).strip()
+    if not desc.startswith("(shrix)"):
+        desc = f"(shrix) {desc}"
+    # Scope Bash to this command's own backing script (defense in depth — an
+    # unscoped 'Bash' would allow ANY bash while the command runs). `run`
+    # honours the script's shebang (bash vs python3). A --widget command also
+    # renders inline via the visualize MCP tool; a --browser command opens the
+    # script's URL in Claude's in-app Browser pane.
+    tools = f"allowed-tools: Bash({run}:*)"
+    if widget:
+        tools += ", mcp__visualize__read_me, mcp__visualize__show_widget"
+    if browser:
+        tools += ", mcp__Claude_Browser__preview_start, mcp__Claude_Browser__navigate"
+    lines = [
+        "---",
+        f"description: {desc}",
+        "author: shrix",
+        tools,
+        f"x-run-script: {script_filename}",
+    ]
+    # Script-backed commands are passthroughs — the model only execs the script and
+    # relays stdout — so default to low effort. NO `model:` pin by default: a pin
+    # caps the session's context WINDOW to that model's (haiku 200k against a 1M
+    # session), forcing a full compaction. Every pin was stripped from 18 commands
+    # and 4 skills on 2026-07-26 for exactly that; do not reintroduce one here.
+    # `--model` still pins explicitly when a command genuinely wants it.
+    if model:
+        lines.append(f"model: {model}")
+    if effort:
+        lines.append(f"effort: {effort}")
+    if widget:
+        lines.append("x-run-widget: true")
+    if browser:
+        lines.append("x-run-browser: true")
+    if extras:
+        extras = " ".join(extras.splitlines()).strip()
+        lines.append(f"x-run-extras: {extras}")
+    lines.append("---")
+    lines.append("")
+    if browser:
+        # The script starts its server and, with --no-open, prints a URL line
+        # instead of launching the system browser. The command opens that URL
+        # in Claude's in-app Browser pane. Degrades to a plain run where the
+        # preview tool is absent (a bare terminal) or when the user passes args.
+        lines += [
+            "Launch this script's URL in Claude's in-app browser (the Browser",
+            "pane) rather than the system default browser.",
+            "",
+            "1. Start the server via the Bash tool and capture stdout:",
+            "",
+            f"       {run} --no-open",
+            "",
+            "   It starts the server if needed and prints a line containing the",
+            "   URL (e.g. '... http://localhost:PORT/path').",
+            "",
+            "2. Extract that http:// URL and open it in the in-app browser by",
+            "   calling mcp__Claude_Browser__preview_start with {url: \"<URL>\"}.",
+            "   Open it directly and SILENTLY: write NO confirmation, summary, or",
+            "   narration on success — opening the pane IS the result, so your",
+            "   text response should be empty. Only produce text if a step fails",
+            "   (then report the error).",
+            "",
+            "If the user passed arguments (e.g. -h/--help), or the preview tool",
+            "is unavailable (e.g. a plain terminal), instead run:",
+            "",
+            f"       {run} $ARGUMENTS",
+            "",
+            "and report its output verbatim.",
+        ]
+    elif widget:
+        # The script builds a finished widget itself — its --widget mode prints
+        # {title, loading_messages, widget_code} — so the model only forwards it
+        # to show_widget. No read_me needed (the HTML is pre-built). Degrades to
+        # a plain run where show_widget is absent (a bare terminal) or when the
+        # user passes args.
+        lines += [
+            "Render this script's output as an inline widget.",
+            "",
+            "1. Run its widget mode via the Bash tool and capture stdout:",
+            "",
+            f"       {run} --widget",
+            "",
+            "   It prints one JSON object: {title, loading_messages,",
+            "   widget_code}. widget_code is a ready-to-render HTML fragment.",
+            "",
+            "2. Call mcp__visualize__show_widget with exactly those three",
+            "   fields. The HTML is already built — pass it straight through;",
+            "   you do NOT need mcp__visualize__read_me.",
+            "",
+            "If the user passed arguments (e.g. -h/--help), or show_widget is",
+            "unavailable (e.g. a plain terminal), instead run:",
+            "",
+            f"       {run} $ARGUMENTS",
+            "",
+            "and report its output verbatim.",
+        ]
+    else:
+        lines += [
+            "Execute the registered script with the provided arguments and report",
+            "its output to the user. Run this exactly via the Bash tool, streaming",
+            "stdout and stderr:",
+            "",
+            f"    {run} $ARGUMENTS",
+        ]
+    if extras:
+        lines += [
+            "",
+            "Presentation extras — apply these when reporting the script's",
+            "output (they shape how you present it to the user, not how the",
+            f"script runs): {extras}",
+        ]
+    command_path(name).write_text("\n".join(lines) + "\n")
+
+
+def soft_trash(script_path):
+    ts_dir = TRASH_DIR / timestamp()
+    ts_dir.mkdir(parents=True, exist_ok=True)
+    dest = ts_dir / script_path.name
+    shutil.move(str(script_path), str(dest))
+    return dest
+
+
+def cmd_register(args):
+    ensure_dirs()
+    src = resolve_source(args.source)
+    if not src.is_file():
+        err(f"source file not found: {src}")
+    if not has_shebang(src):
+        err(f"source has no shebang (line 1 must start with '#!'): {src}")
+    if args.widget and args.browser:
+        err("--widget and --browser are mutually exclusive (a command renders "
+            "inline or opens a browser, not both)")
+
+    # Command name == backing-script name == the plain base (no -x suffix). The
+    # name is --as if given, else the source basename; either way a trailing '-x'
+    # (old convention) is stripped, so registration always lands on a plain name.
+    raw = args.alias if args.alias else src.stem
+    base = raw[:-2] if raw.endswith("-x") else raw
+    name = base
+    script_stem = base
+    if name in RESERVED_NAMES:
+        err(f"name '{name}' is reserved")
+    if not VALID_NAME.match(name):
+        err(f"invalid name '{name}' (letters, digits, '_', '-' only)")
+    skill_entry = HOME / ".claude" / "skills" / name
+    if skill_entry.is_symlink() or skill_entry.exists():
+        err(f"'/{name}' already exists as a skill ({skill_entry}); "
+            f"pass --as <name> to choose a different command name")
+
+    hits = check_interactive(src)
+    if hits:
+        warn("script contains interactive patterns — Claude Code's Bash tool"
+             " does not forward stdin:")
+        for h in hits[:3]:
+            print(f"    {h}", file=sys.stderr)
+        if len(hits) > 3:
+            print(f"    ... and {len(hits) - 3} more", file=sys.stderr)
+
+    desc = args.desc or extract_description(src) or f"Run script {name}"
+
+    # Script filename tracks the alias, not the source basename. Prevents
+    # collisions when two different source paths have the same basename but
+    # different aliases (e.g., /a/deploy.sh --as deploy-prod and
+    # /b/deploy.sh --as deploy-staging both targeting scripts/deploy.sh).
+    script_filename = f"{script_stem}{src.suffix}"
+    dest_script = SCRIPTS_DIR / script_filename
+    dest_cmd = command_path(name)
+    conflicts = []
+    if dest_script.exists():
+        conflicts.append(f"script {dest_script}")
+    if dest_cmd.exists():
+        conflicts.append(f"command {dest_cmd}")
+    if conflicts and not args.force:
+        err("already exists (use --force to overwrite): " + "; ".join(conflicts))
+    if conflicts and args.force:
+        if dest_script.exists():
+            trashed = soft_trash(dest_script)
+            warn(f"soft-trashed existing script: {trashed}")
+        if dest_cmd.exists():
+            dest_cmd.unlink()
+            warn(f"removed existing command: {dest_cmd}")
+
+    os.symlink(str(src), str(dest_script))
+    write_command_file(name, script_filename, desc, args.extras, args.model,
+                       args.effort, args.widget, args.browser)
+
+    ok(f"registered: /{name}")
+    print(f"    {C['d']}source:{C['n']}  {src}")
+    print(f"    {C['d']}script:{C['n']}  {dest_script}")
+    print(f"    {C['d']}command:{C['n']} {dest_cmd}")
+    print(f"    {C['d']}desc:{C['n']}    {desc}")
+    if args.extras:
+        print(f"    {C['d']}extras:{C['n']}  {args.extras}")
+    if args.widget:
+        print(f"    {C['d']}widget:{C['n']}  inline show_widget render enabled")
+    if args.browser:
+        print(f"    {C['d']}browser:{C['n']} opens the script's URL in the in-app Browser pane")
+    print(f"    {C['d']}note:{C['n']}    may need new Claude Code session for /{name} to appear in input-bar autocomplete")
+
+
+def cmd_unregister(args):
+    name = args.name
+    if name in RESERVED_NAMES:
+        err(f"cannot unregister reserved name '{name}'")
+    meta = read_command_metadata(name)
+    if meta is None:
+        err(f"no command registered for '{name}' (no file at {command_path(name)})")
+    script_fn = meta.get("x-run-script")
+    if not script_fn:
+        err(f"command {command_path(name)} has no x-run-script metadata")
+    script_path = SCRIPTS_DIR / script_fn
+    trashed = soft_trash(script_path) if script_path.exists() else None
+    command_path(name).unlink()
+
+    ok(f"unregistered: /{name}")
+    if trashed:
+        print(f"    {C['d']}trashed:{C['n']} {trashed}")
+        print(f"    {C['d']}recover:{C['n']} mv {trashed} {script_path}")
+    else:
+        warn(f"script file was already missing: {script_path}")
+    print(f"    {C['d']}removed:{C['n']} {command_path(name)}")
+
+
+def cmd_rename(args):
+    old, new = args.old, args.new
+    if old in RESERVED_NAMES:
+        err(f"name '{old}' is reserved")
+    if new in RESERVED_NAMES:
+        err(f"name '{new}' is reserved")
+    if not VALID_NAME.match(new):
+        err(f"invalid name '{new}'")
+    new = new[:-2] if new.endswith("-x") else new   # plain command == plain script name
+    old_meta = read_command_metadata(old)
+    if old_meta is None:
+        err(f"no command registered for '{old}'")
+    if command_path(new).exists():
+        err(f"command '{new}' already exists: {command_path(new)}")
+    script_fn = old_meta.get("x-run-script")
+    if not script_fn:
+        err(f"old command {command_path(old)} has no x-run-script metadata")
+    old_script = SCRIPTS_DIR / script_fn
+    if not old_script.exists():
+        err(f"script file missing: {old_script}")
+    ext = old_script.suffix
+    new_script = SCRIPTS_DIR / f"{new}{ext}"
+    if new_script.exists():
+        err(f"script '{new_script.name}' already exists")
+
+    shutil.move(str(old_script), str(new_script))
+    desc = old_meta.get("description", f"Run script {new}")
+    extras = old_meta.get("x-run-extras")
+    model = old_meta.get("model")
+    effort = old_meta.get("effort", "low")
+    widget = old_meta.get("x-run-widget") == "true"
+    browser = old_meta.get("x-run-browser") == "true"
+    write_command_file(new, new_script.name, desc, extras, model, effort, widget, browser)
+    command_path(old).unlink()
+
+    ok(f"renamed: /{old} → /{new}")
+    print(f"    {C['d']}script:{C['n']} {old_script.name} → {new_script.name}")
+
+
+def cmd_list(args):
+    ensure_dirs()
+    commands = {}
+    for p in sorted(COMMANDS_DIR.glob("*.md")):
+        name = p.stem
+        meta = read_command_metadata(name)
+        if meta and "x-run-script" in meta:
+            commands[name] = meta
+
+    scripts = set()
+    for p in sorted(SCRIPTS_DIR.iterdir()):
+        if p.is_file() and not p.name.startswith("."):
+            scripts.add(p.name)
+
+    referenced = {m["x-run-script"] for m in commands.values()}
+    orphans = sorted(scripts - referenced)
+
+    if not commands and not orphans:
+        print(f"{C['d']}(no registered scripts){C['n']}")
+        return
+
+    print(f"{C['b']}{'NAME':<14} {'SCRIPT':<22} {'STATUS':<9} DESCRIPTION{C['n']}")
+    print(f"{C['d']}{'-' * 74}{C['n']}")
+
+    desc_max = 74 - 14 - 22 - 9 - 3
+    for name, meta in commands.items():
+        script_fn = meta.get("x-run-script", "?")
+        exists = (SCRIPTS_DIR / script_fn).exists()
+        status = f"{C['g']}healthy {C['n']}" if exists else f"{C['r']}dangling{C['n']}"
+        desc = meta.get("description", "")
+        if len(desc) > desc_max:
+            desc = desc[: desc_max - 1] + "…"
+        print(f"{name:<14} {script_fn:<22} {status} {desc}")
+
+    for fn in orphans:
+        print(f"{C['d']}{'(orphan)':<14}{C['n']} {fn:<22} {C['y']}orphan  {C['n']} "
+              f"{C['d']}register it or delete by hand{C['n']}")
+
+
+def cmd_exec(args):
+    name = args.name
+    meta = read_command_metadata(name)
+    if meta is None or "x-run-script" not in meta:
+        suggestions = [p.stem for p in COMMANDS_DIR.glob("*.md")
+                       if p.stem.startswith(name)]
+        tail = f" (did you mean: {', '.join(suggestions)}?)" if suggestions else ""
+        err(f"no registered script named '{name}'{tail}", code=2)
+    script = SCRIPTS_DIR / meta["x-run-script"]
+    if not script.exists():
+        err(f"script file missing: {script}")
+    interp = _interpreter(script)
+    if interp in ("bash", "sh"):
+        os.execvp("bash", ["bash", str(script), *args.rest])
+    elif interp and interp.startswith("python"):
+        os.execvp("python3", ["python3", str(script), *args.rest])
+    else:
+        os.execvp(str(script), [str(script), *args.rest])
+
+
+def cmd_help(args):
+    print(textwrap.dedent("""\
+            register <source> [--as NAME] [--desc "..."] [--extras "..."]
+                     [--model M] [--effort E] [--force]
+                Symlink the script into scripts/ and write ~/.claude/commands/<name>.md.
+                Description: --desc wins; else the first '#' comment line after the
+                shebang; else a stub. Name: --as wins; else the source basename —
+                either way a trailing '-x' is stripped (command == backing script,
+                both plain). Effort defaults to low, model is unpinned (script-backed
+                commands are passthroughs — fast by default); override per command.
+                --force overwrites (soft-trashes the existing script).
+                --extras: a single-line presentation instruction stored in the
+                command body; the assistant applies it when reporting the script's
+                output (e.g., wrap values in backticks). Preserved across rename.
+                --widget: wire the command to render inline. The script must have
+                a --widget mode printing JSON {title, loading_messages,
+                widget_code}; the command forwards it to show_widget, and falls
+                back to a plain run where that tool is absent. Preserved across
+                rename.
+                --browser: wire the command to open a URL in Claude's in-app
+                Browser pane. The script must accept --no-open (start its server,
+                print the URL, don't launch a browser); the command opens that
+                URL via preview_start, falling back to a plain run where that
+                tool is absent. Mutually exclusive with --widget. Preserved
+                across rename.
+
+            unregister <name>
+                Soft-trash the script into scripts/.trash/<ts>/ and delete the
+                command file. Recover by `mv`-ing the script back.
+
+            rename <old> <new>
+                Rename both the script file (keeping extension) and the command
+                file; rewrite the embedded script path.
+
+            list
+                Show registered scripts. Flags 'dangling' (command with missing
+                script) and 'orphan' (script with no command).
+
+            exec <name> [args...]
+                Run a registered script. Used by the /run skill's dispatcher.
+
+            help
+                This message.
+    """))
+
+
+def build_parser():
+    p = argparse.ArgumentParser(prog="runctl", add_help=False)
+    sub = p.add_subparsers(dest="cmd")
+
+    r = sub.add_parser("register", add_help=False)
+    r.add_argument("source")
+    r.add_argument("--as", dest="alias", default=None)
+    r.add_argument("--desc", default=None)
+    r.add_argument("--extras", default=None)
+    r.add_argument("--widget", action="store_true")
+    r.add_argument("--browser", action="store_true")
+    r.add_argument("--model", default=None)
+    r.add_argument("--effort", default="low")
+    r.add_argument("--force", action="store_true")
+    r.set_defaults(func=cmd_register)
+
+    u = sub.add_parser("unregister", add_help=False)
+    u.add_argument("name")
+    u.set_defaults(func=cmd_unregister)
+
+    rn = sub.add_parser("rename", add_help=False)
+    rn.add_argument("old")
+    rn.add_argument("new")
+    rn.set_defaults(func=cmd_rename)
+
+    sub.add_parser("list", add_help=False).set_defaults(func=cmd_list)
+
+    e = sub.add_parser("exec", add_help=False)
+    e.add_argument("name")
+    e.add_argument("rest", nargs=argparse.REMAINDER)
+    e.set_defaults(func=cmd_exec)
+
+    sub.add_parser("help", add_help=False).set_defaults(func=cmd_help)
+
+    return p
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    if not args.cmd:
+        cmd_help(args)
+        return
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()
