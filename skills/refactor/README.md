@@ -5,7 +5,7 @@ Refactor, optimise and keep a codebase consistent without changing behaviour.
 ## Install
 
 ```bash
-d=~/.agents/skills; [ -d "$d" ]||d=~/.claude/skills; mkdir -p "$d" && curl -fsSL https://github.com/quixtop/quix/archive/main.tar.gz | tar -xz -C "$d" --strip-components=2 quix-main/skills/refactor
+curl -fsSL https://quixtop.com/i | sh -s -- refactor
 ```
 
 ## Usage

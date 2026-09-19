@@ -5,7 +5,7 @@ Summarise the diff since the last push into a pushlog entry. Needs: chatlog.
 ## Install
 
 ```bash
-d=~/.agents/skills; [ -d "$d" ]||d=~/.claude/skills; mkdir -p "$d" && curl -fsSL https://github.com/quixtop/quix/archive/main.tar.gz | tar -xz -C "$d" --strip-components=2 quix-main/skills/pushlog
+curl -fsSL https://quixtop.com/i | sh -s -- pushlog
 ```
 
 ## Requires

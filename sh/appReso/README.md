@@ -5,7 +5,7 @@ Per-app CPU and memory rollup on macOS.
 ## Install
 
 ```bash
-mkdir -p ~/.local/bin && curl -fsSL https://raw.githubusercontent.com/quixtop/quix/main/sh/appReso/appReso -o ~/.local/bin/appReso && chmod +x ~/.local/bin/appReso
+curl -fsSL https://quixtop.com/i | sh -s -- appreso
 ```
 
 ## Usage

@@ -5,7 +5,7 @@ Inventory installed apps, brew, npm and pip as Markdown and HTML. Needs: Python 
 ## Install
 
 ```bash
-mkdir -p ~/.local/bin && curl -fsSL https://raw.githubusercontent.com/quixtop/quix/main/sh/instls/instls -o ~/.local/bin/instls && chmod +x ~/.local/bin/instls
+curl -fsSL https://quixtop.com/i | sh -s -- instls
 ```
 
 ## Requires

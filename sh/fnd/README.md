@@ -5,7 +5,7 @@ Fast filename search; -s switches to content search. Needs: fd, ripgrep.
 ## Install
 
 ```bash
-mkdir -p ~/.local/bin && curl -fsSL https://raw.githubusercontent.com/quixtop/quix/main/sh/fnd/fnd -o ~/.local/bin/fnd && chmod +x ~/.local/bin/fnd
+curl -fsSL https://quixtop.com/i | sh -s -- fnd
 ```
 
 ## Requires

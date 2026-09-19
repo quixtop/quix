@@ -5,7 +5,7 @@ Delegate named tasks to background Codex workers, keep working, then verify thei
 ## Install
 
 ```bash
-d=~/.agents/skills; [ -d "$d" ]||d=~/.claude/skills; mkdir -p "$d" && curl -fsSL https://github.com/quixtop/quix/archive/main.tar.gz | tar -xz -C "$d" --strip-components=2 quix-main/skills/subcodex
+curl -fsSL https://quixtop.com/i | sh -s -- subcodex
 ```
 
 ## Requires

@@ -1,1 +1,0 @@
-/private/tmp/hello.sh

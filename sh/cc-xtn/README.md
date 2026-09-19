@@ -5,7 +5,7 @@ Enable and disable Claude Code plugins, skills and MCP servers; see their token 
 ## Install
 
 ```bash
-mkdir -p ~/.local/bin && curl -fsSL https://raw.githubusercontent.com/quixtop/quix/main/sh/cc-xtn/cc-xtn -o ~/.local/bin/cc-xtn && chmod +x ~/.local/bin/cc-xtn
+curl -fsSL https://quixtop.com/i | sh -s -- cc-xtn
 ```
 
 ## Requires

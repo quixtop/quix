@@ -5,7 +5,7 @@ An adversarial panel — agents from different models judge the same question in
 ## Install
 
 ```bash
-d=~/.agents/skills; [ -d "$d" ]||d=~/.claude/skills; mkdir -p "$d" && curl -fsSL https://github.com/quixtop/quix/archive/main.tar.gz | tar -xz -C "$d" --strip-components=2 quix-main/skills/panel
+curl -fsSL https://quixtop.com/i | sh -s -- panel
 ```
 
 ## Requires

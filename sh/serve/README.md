@@ -5,7 +5,7 @@ A local HTTP server that shuts itself down when idle. Needs: Python 3.
 ## Install
 
 ```bash
-mkdir -p ~/.local/bin && curl -fsSL https://raw.githubusercontent.com/quixtop/quix/main/sh/serve/serve -o ~/.local/bin/serve && chmod +x ~/.local/bin/serve
+curl -fsSL https://quixtop.com/i | sh -s -- serve
 ```
 
 ## Requires

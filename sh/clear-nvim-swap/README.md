@@ -5,7 +5,7 @@ Remove stale Neovim swap files — refuses while nvim is open, supports a dry ru
 ## Install
 
 ```bash
-mkdir -p ~/.local/bin && curl -fsSL https://raw.githubusercontent.com/quixtop/quix/main/sh/clear-nvim-swap/clear-nvim-swap -o ~/.local/bin/clear-nvim-swap && chmod +x ~/.local/bin/clear-nvim-swap
+curl -fsSL https://quixtop.com/i | sh -s -- clear-nvim-swap
 ```
 
 ## Requires

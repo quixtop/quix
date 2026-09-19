@@ -1,1 +1,0 @@
-/private/tmp/claude-501/-Volumes-NVMe2TB-shrix-Dev-Code-Git-xcratch/87bc5377-8a91-4eb1-b687-e34051454577/scratchpad/ftptest.sh

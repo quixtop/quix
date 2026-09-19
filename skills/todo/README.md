@@ -5,7 +5,7 @@ A personal todo list in a markdown file you choose. Needs: Python 3.
 ## Install
 
 ```bash
-d=~/.agents/skills; [ -d "$d" ]||d=~/.claude/skills; mkdir -p "$d" && curl -fsSL https://github.com/quixtop/quix/archive/main.tar.gz | tar -xz -C "$d" --strip-components=2 quix-main/skills/todo
+curl -fsSL https://quixtop.com/i | sh -s -- todo
 ```
 
 ## Requires

@@ -5,7 +5,7 @@ Reclaim disk by deleting app caches only — never data. Needs: proj-env.sh.
 ## Install
 
 ```bash
-mkdir -p ~/.local/bin && curl -fsSL https://raw.githubusercontent.com/quixtop/quix/main/sh/clearCache/clearCache -o ~/.local/bin/clearCache && chmod +x ~/.local/bin/clearCache
+curl -fsSL https://quixtop.com/i | sh -s -- clearcache
 ```
 
 ## Requires

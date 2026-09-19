@@ -5,7 +5,7 @@ Watch ~/.claude.json's size with health indicators. Needs: jq, Claude Code.
 ## Install
 
 ```bash
-mkdir -p ~/.local/bin && curl -fsSL https://raw.githubusercontent.com/quixtop/quix/main/sh/cc-chk/cc-chk -o ~/.local/bin/cc-chk && chmod +x ~/.local/bin/cc-chk
+curl -fsSL https://quixtop.com/i | sh -s -- cc-chk
 ```
 
 ## Requires

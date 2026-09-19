@@ -5,7 +5,7 @@ macOS diagnostics in one run — CPU, memory, disk, thermal, top processes.
 ## Install
 
 ```bash
-mkdir -p ~/.local/bin && curl -fsSL https://raw.githubusercontent.com/quixtop/quix/main/sh/syschk/syschk -o ~/.local/bin/syschk && chmod +x ~/.local/bin/syschk
+curl -fsSL https://quixtop.com/i | sh -s -- syschk
 ```
 
 ## Usage

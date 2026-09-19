@@ -5,7 +5,7 @@ Shared shell helpers three of these scripts source — status lines, colours, pr
 ## Install
 
 ```bash
-mkdir -p ~/.local/bin && curl -fsSL https://raw.githubusercontent.com/quixtop/quix/main/sh/proj-env.sh/proj-env.sh -o ~/.local/bin/proj-env.sh && chmod +x ~/.local/bin/proj-env.sh
+curl -fsSL https://quixtop.com/i | sh -s -- proj-env
 ```
 
 ## Usage

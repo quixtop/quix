@@ -5,7 +5,7 @@ Compare two directories — line counts and diffs, side by side. Needs: proj-env
 ## Install
 
 ```bash
-mkdir -p ~/.local/bin && curl -fsSL https://raw.githubusercontent.com/quixtop/quix/main/sh/fido/fido -o ~/.local/bin/fido && chmod +x ~/.local/bin/fido
+curl -fsSL https://quixtop.com/i | sh -s -- fido
 ```
 
 ## Requires

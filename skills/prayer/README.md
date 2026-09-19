@@ -5,7 +5,7 @@ Re-read every rule file in full and comply from here on.
 ## Install
 
 ```bash
-d=~/.agents/skills; [ -d "$d" ]||d=~/.claude/skills; mkdir -p "$d" && curl -fsSL https://github.com/quixtop/quix/archive/main.tar.gz | tar -xz -C "$d" --strip-components=2 quix-main/skills/prayer
+curl -fsSL https://quixtop.com/i | sh -s -- prayer
 ```
 
 ## Usage

@@ -5,7 +5,7 @@ Audit and repair the naming and identity convention across your skills. Needs: P
 ## Install
 
 ```bash
-d=~/.agents/skills; [ -d "$d" ]||d=~/.claude/skills; mkdir -p "$d" && curl -fsSL https://github.com/quixtop/quix/archive/main.tar.gz | tar -xz -C "$d" --strip-components=2 quix-main/skills/skillsync
+curl -fsSL https://quixtop.com/i | sh -s -- skillsync
 ```
 
 ## Requires

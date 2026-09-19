@@ -5,7 +5,7 @@ Generate, verify and update code documentation — READMEs, changelogs, release 
 ## Install
 
 ```bash
-d=~/.agents/skills; [ -d "$d" ]||d=~/.claude/skills; mkdir -p "$d" && curl -fsSL https://github.com/quixtop/quix/archive/main.tar.gz | tar -xz -C "$d" --strip-components=2 quix-main/skills/codedoc
+curl -fsSL https://quixtop.com/i | sh -s -- codedoc
 ```
 
 ## Usage

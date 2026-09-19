@@ -5,7 +5,7 @@ Pull the t.co link out of a tweet and print the real URL. Needs: Python 3.
 ## Install
 
 ```bash
-mkdir -p ~/.local/bin && curl -fsSL https://raw.githubusercontent.com/quixtop/quix/main/sh/tshort/tshort -o ~/.local/bin/tshort && chmod +x ~/.local/bin/tshort
+curl -fsSL https://quixtop.com/i | sh -s -- tshort
 ```
 
 ## Requires

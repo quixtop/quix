@@ -5,7 +5,7 @@ A minimal interactive Claude REPL on top of `claude -p`. Needs: Claude Code.
 ## Install
 
 ```bash
-mkdir -p ~/.local/bin && curl -fsSL https://raw.githubusercontent.com/quixtop/quix/main/sh/clido/clido -o ~/.local/bin/clido && chmod +x ~/.local/bin/clido
+curl -fsSL https://quixtop.com/i | sh -s -- clido
 ```
 
 ## Requires

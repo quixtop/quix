@@ -5,7 +5,7 @@ Reclaim space by APFS-cloning duplicate files — deletes nothing. Needs: Python
 ## Install
 
 ```bash
-mkdir -p ~/.local/bin && curl -fsSL https://raw.githubusercontent.com/quixtop/quix/main/sh/dedup/dedup -o ~/.local/bin/dedup && chmod +x ~/.local/bin/dedup
+curl -fsSL https://quixtop.com/i | sh -s -- dedup
 ```
 
 ## Requires

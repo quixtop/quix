@@ -5,7 +5,7 @@ Ship recent changes wherever they run — gate, review, deploy, prove, log — i
 ## Install
 
 ```bash
-d=~/.agents/skills; [ -d "$d" ]||d=~/.claude/skills; mkdir -p "$d" && curl -fsSL https://github.com/quixtop/quix/archive/main.tar.gz | tar -xz -C "$d" --strip-components=2 quix-main/skills/dep
+curl -fsSL https://quixtop.com/i | sh -s -- dep
 ```
 
 ## Usage

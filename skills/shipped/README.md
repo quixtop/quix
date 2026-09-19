@@ -5,7 +5,7 @@ The last n features shipped, as a table, with your own smoke-test state.
 ## Install
 
 ```bash
-d=~/.agents/skills; [ -d "$d" ]||d=~/.claude/skills; mkdir -p "$d" && curl -fsSL https://github.com/quixtop/quix/archive/main.tar.gz | tar -xz -C "$d" --strip-components=2 quix-main/skills/shipped
+curl -fsSL https://quixtop.com/i | sh -s -- shipped
 ```
 
 ## Usage

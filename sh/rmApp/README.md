@@ -5,7 +5,7 @@ Remove a Mac app and every on-disk trace it left behind. Needs: Homebrew.
 ## Install
 
 ```bash
-mkdir -p ~/.local/bin && curl -fsSL https://raw.githubusercontent.com/quixtop/quix/main/sh/rmApp/rmApp -o ~/.local/bin/rmApp && chmod +x ~/.local/bin/rmApp
+curl -fsSL https://quixtop.com/i | sh -s -- rmapp
 ```
 
 ## Requires
