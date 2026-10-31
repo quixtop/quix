@@ -4,9 +4,10 @@
 # clearCache — reclaim disk by deleting app CACHES only. Never touches data.
 #
 # Usage:
-#   clearCache                   Guided walkthrough — scans, shows sizes, asks.
+#   clearCache                   Guided walkthrough — scans and shows sizes; deletes nothing.
 #   clearCache <App>             Clear one app's caches (preview, then [y/N]).
 #   clearCache all               Every closed app's caches (preview, then [y/N]).
+#   clearCache -c | --claude     Claude Desktop + Claude Code caches (see Claude below).
 #   clearCache -n | --dry-run    Report only; change nothing. Combine with any of the above.
 #   clearCache -f | --force      Skip the prompt.
 #   clearCache -h | --help       Show this help.
@@ -16,6 +17,7 @@
 #   clearCache Arc               Preview Arc's caches, prompt before deleting.
 #   clearCache all -n            See total reclaimable across every closed app.
 #   clearCache Spotify -f        Clear Spotify without prompting.
+#   clearCache --claude -n       Size Claude's caches — works while Claude runs.
 #
 # What counts as CACHE (removed):
 #   ~/Library/Caches/<app>                     HTTP / asset cache
@@ -32,12 +34,38 @@
 #   Service Worker/Database (registration index — deleting deregisters workers)
 #   Anything under /System, /Library, or a com.apple.* container
 #
+# Claude (--claude):
+#   The default run treats Claude Desktop like any app: its top-level caches,
+#   skipped while Claude Desktop (or a process named claude) runs. --claude
+#   reaches further, and REFUSES instead of skipping:
+#   Application Support/Claude/<cache dirs above>          Desktop renderer caches
+#   Application Support/Claude/Partitions/*/<cache dirs>   browser pane, previews
+#   Caches/Claude, Caches/com.anthropic.claudefordesktop   Desktop's URL caches
+#   Caches/claude-cli-nodejs                               Claude Code MCP logs
+#   Never: sign-ins (Cookies, Local Storage, IndexedDB), vm_bundles (the VM
+#   and its session disk), claude-code (bundled CLI), anything in ~/.claude.
+#   Refuses (exit 1) while Claude Desktop, a helper, or a claude CLI or daemon
+#   runs — so never from inside Claude Code — and when ps cannot run to tell.
+#   (A claude started through a link of another name is not seen.) Deletes only
+#   inside Claude's own folders: a symlink leading out is skipped.
+#
 # Safety:
 #   - SKIPS any app that is running. Detection uses `ps -Ao comm=` (the
 #     executable name), NOT `pgrep -f` — the latter also searches each
 #     process's ENVIRONMENT block, so an unrelated process carrying a long
 #     PATH will match an app name and produce a false "running".
-#   - Dry-run preview with sizes before anything is deleted, unless -f.
+#   - When ps cannot run (a sandbox) or sees only part of the system, nothing can
+#     be seen running: one app by name is refused, and `all` skips every app. The
+#     walkthrough and a dry run (-n) show the sizes anyway: they delete nothing.
+#   - One app by name is refused while it runs; what runs is read again once the
+#     prompt is answered, and again before each app or folder is cleared.
+#   - An app is asked for by name, one at a time: a path ('/', '.', '..'), a name
+#     with a line break, or one of Apple's own (com.apple.*, any case) is refused,
+#     and a folder so named is never cleared. HOME must be this user's own folder,
+#     never '/'.
+#   - Deletes only inside an app's own folders: a cache reached through a link
+#     inside one is left.
+#   - A preview with sizes comes before anything is deleted; -f skips only the prompt.
 #   - Only ever removes paths whose basename is on the cache list above.
 set -u
 
@@ -50,7 +78,8 @@ trap _gap EXIT
 # § Script Output Contract.
 source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/proj-env.sh"
 
-DRY=0; FORCE=0; TARGET=""
+DRY=0; FORCE=0; CLAUDE=0; TARGET=""
+: "${HOME:=}"   # unset is empty: the HOME guard below refuses it with a status line
 A="$HOME/Library/Application Support"
 C="$HOME/Library/Caches"
 
@@ -75,38 +104,75 @@ CACHE_DIRS=(
   "User Data/component_crx_cache" "User Data/extensions_crx_cache"
 )
 
-hsize() { du -sh "$1" 2>/dev/null | awk '{print $1}'; }
-ksize() { du -sk "$1" 2>/dev/null | awk '{print $1+0}'; }
+# du's first line only: a path holding a newline prints on more than one.
+hsize() { du -sh "$1" 2>/dev/null | awk '{print $1; exit}'; }
+ksize() { du -sk "$1" 2>/dev/null | awk '{print $1+0; exit}'; }
 
-# ─── App resolution — same four locations and bundle-ID lookup as rmApp ─────
+# True when a name can be an app's folder; else NAME_WHY says why. Never a path ('/', '.',
+# '..' reach other folders), never a line break (it splits a list of names in two), never
+# Apple's own in any case. No subshell: it runs once per folder.
+NAME_WHY=""
+app_name_ok() {
+  case "$1" in
+    ""|.|..|*/*) NAME_WHY="not an app name";;
+    *$'\n'*) NAME_WHY="a line break in the name";;
+    [Cc][Oo][Mm].[Aa][Pp][Pp][Ll][Ee].*) NAME_WHY="Apple's own — never touched";;
+    *) NAME_WHY=""; return 0;;
+  esac
+  return 1
+}
+
+# ─── App resolution — rmApp's APP_ROOTS; the first match wins ───────────────
 # A user types the APP name ("Brave Browser"); its support folder is often
 # something else ("BraveSoftware"). Resolve via the bundle, then fall back to
-# a case-insensitive folder match, so both spellings work.
+# a case-insensitive folder match, so both spellings work. The app is looked
+# for as <folder>/<App>.app, then one folder down, since some vendors ship a
+# folder (Arturia/, WD Discovery/). APP_ROOTS is a verbatim copy of rmApp's;
+# ~/.agents/tests/bin/test_app_lookup.sh fails when they differ.
+APP_ROOTS=("/Applications" "$HOME/Applications" "/Applications/Setapp" "/Applications/Utilities")
 APP_PATH=""; BID=""
 resolve_app() {
-  local n="$1" d
-  for d in "/Applications" "$HOME/Applications" "/Applications/Setapp" "/Applications/Utilities"; do
+  local n="$1" d m
+  for d in "${APP_ROOTS[@]}"; do
     [ -d "$d/$n.app" ] && { APP_PATH="$d/$n.app"; break; }
   done
+  if [ -z "$APP_PATH" ]; then
+    for d in "${APP_ROOTS[@]}"; do
+      for m in "$d"/*/"$n.app"; do
+        [ -d "$m" ] && { APP_PATH="$m"; break 2; }
+      done
+    done
+  fi
   [ -n "$APP_PATH" ] && \
     BID=$(defaults read "$APP_PATH/Contents/Info" CFBundleIdentifier 2>/dev/null | tr -d '\n')
 }
 
-# Support-folder name(s) for a typed app name. Echoes one per line.
+# Support-folder name(s) for a typed app name, one per line. Names go out through printf:
+# echo would take a folder named -e or -n for an option and print nothing.
 support_dirs_for() {
-  local n="$1" vendor
-  [ -d "$A/$n" ] && echo "$n"
-  # exact-case-insensitive folder match
+  local n="$1" lcn vendor d f found=0
+  lcn=$(printf '%s' "$n" | tr 'A-Z' 'a-z')
+  # case-insensitive folder match, each folder by its own name, once (on a case-insensitive
+  # disk 'spotify' IS 'Spotify'); the name from the path itself: $(basename) would drop a
+  # trailing line break and name another folder
   for d in "$A"/*/; do
-    [ "$(basename "$d")" = "$n" ] && continue
-    [ "$(echo "$(basename "$d")" | tr 'A-Z' 'a-z')" = "$(echo "$n" | tr 'A-Z' 'a-z')" ] && echo "$(basename "$d")"
+    f=${d%/}; f=${f##*/}
+    app_name_ok "$f" || continue
+    [ "$(printf '%s' "$f" | tr 'A-Z' 'a-z')" = "$lcn" ] && { printf '%s\n' "$f"; found=1; }
   done
-  # vendor folder implied by the bundle ID (com.brave.Browser -> Brave*)
+  [ "$found" -eq 0 ] && [ -d "$A/$n" ] && printf '%s\n' "$n"   # one the listing hides (.name)
+  # vendor folder implied by the bundle ID (com.brave.Browser -> Brave*). A vendor of a
+  # letter or two ("com..x", "com.a.x") would match unrelated folders: none is looked for.
+  # Apple's own (Apple*: com.apple.Safari, or a vendor like "appl") are never reached this way.
   if [ -n "$BID" ]; then
-    vendor=$(echo "$BID" | cut -d. -f2)
+    vendor=$(printf '%s\n' "$BID" | cut -d. -f2 | tr 'A-Z' 'a-z')
+    [ "${#vendor}" -ge 3 ] || return 0
     for d in "$A"/*/; do
-      case "$(echo "$(basename "$d")" | tr 'A-Z' 'a-z')" in
-        "$(echo "$vendor" | tr 'A-Z' 'a-z')"*) echo "$(basename "$d")";;
+      f=${d%/}; f=${f##*/}
+      app_name_ok "$f" || continue
+      case "$(printf '%s' "$f" | tr 'A-Z' 'a-z')" in
+        apple*) ;;
+        "$vendor"*) printf '%s\n' "$f";;
       esac
     done
   fi
@@ -122,23 +188,45 @@ support_dirs_for() {
 #                                                 Chromium helpers)
 #   3. a running /Applications/<App>.app whose NAME starts with the folder
 #      word ("Google Chrome" → folder Google)
-# False positives only cause a SKIP — the safe direction. Snapshot once.
-RUN_COMMS=""; RUN_ARGS=""; RUN_BUNDLES=""
+# False positives only cause a SKIP — the safe direction. Snapshot once. When
+# ps cannot run (a sandbox), lists nothing, or sees only part of the system (no
+# launchd, which always runs), nothing can be seen: RUN_BLIND, and every app
+# counts as running — never taken for closed.
+RUN_COMMS=""; RUN_ARGS=""; RUN_BUNDLES=""; RUN_BLIND=0
+sees_all() { printf '%s\n' "$1" | sed 's|.*/||' | grep -qx launchd; }
 snapshot_running() {
-  RUN_COMMS=$(ps -Ao comm= 2>/dev/null | sed 's|.*/||' | sort -u)
-  RUN_ARGS=$(ps -Axo args= 2>/dev/null)
-  RUN_BUNDLES=$(printf '%s\n' "$RUN_ARGS" \
-    | grep -oE '/Applications/[^/]+\.app' | sed 's|.*/||; s|\.app$||' | sort -u)
+  local comms args
+  RUN_COMMS=""; RUN_ARGS=""; RUN_BUNDLES=""; RUN_BLIND=0   # every call is a fresh reading
+  if comms=$(ps -ww -Ao comm= 2>/dev/null) && [ -n "$comms" ] && sees_all "$comms" \
+    && args=$(ps -ww -Axo args= 2>/dev/null) && [ -n "$args" ]; then
+    RUN_COMMS=$(printf '%s\n' "$comms" | sed 's|.*/||' | sort -u)
+    RUN_ARGS=$args
+    RUN_BUNDLES=$(printf '%s\n' "$RUN_ARGS" \
+      | grep -oE '/Applications/[^/]+\.app' | sed 's|.*/||; s|\.app$||' | sort -u)
+  else
+    RUN_BLIND=1
+  fi
+}
+skip_reason() {
+  if [ "$RUN_BLIND" -eq 1 ]; then echo "can't tell if running (ps unavailable)"; else echo "running"; fi
+}
+# Why $1 skips happened, $2 of them with no reading of what runs (each skip has its own).
+skips_why() {
+  if [ "$2" -eq 0 ]; then echo "running"
+  elif [ "$2" -eq "$1" ]; then echo "can't tell if running (ps unavailable)"
+  else echo "running, or no way to tell"
+  fi
 }
 is_running() {
   local n="$1" lcn b
-  [ -z "$RUN_COMMS" ] && snapshot_running
-  printf '%s\n' "$RUN_COMMS" | grep -qix "$n" && return 0
+  [ -z "$RUN_COMMS" ] && [ "$RUN_BLIND" -eq 0 ] && snapshot_running
+  [ "$RUN_BLIND" -eq 1 ] && return 0
+  printf '%s\n' "$RUN_COMMS" | grep -qixF -- "$n" && return 0   # a name, not a pattern: "Foo [Beta]"
   printf '%s\n' "$RUN_ARGS" | grep -qiF "Application Support/$n" && return 0
-  lcn=$(echo "$n" | tr 'A-Z' 'a-z')
+  lcn=$(printf '%s' "$n" | tr 'A-Z' 'a-z')
   while IFS= read -r b; do
     [ -n "$b" ] || continue
-    case "$(echo "$b" | tr 'A-Z' 'a-z')" in
+    case "$(printf '%s' "$b" | tr 'A-Z' 'a-z')" in
       "$lcn"|"$lcn "*) return 0;;
     esac
   done <<< "$RUN_BUNDLES"
@@ -155,36 +243,136 @@ paths_for() {
   done
 }
 
-# List candidate app names (anything with at least one cache dir).
+# True when no folder between the app's own and the cache is a link: one inside the app's
+# folder could lead the delete anywhere. Caches/<app> and the cache folder itself may be
+# links — rm removes the link, never what it points at.
+app_owned() {
+  local app="$1" p="$2" rest here="$A/$1"
+  [ "$p" = "$C/$app" ] && return 0
+  rest=${p#"$A/$app/"}
+  [ "$rest" != "$p" ] || return 1   # not under the app's folder at all
+  while [ "$rest" != "${rest#*/}" ]; do
+    here="$here/${rest%%/*}"; rest=${rest#*/}
+    [ -L "$here" ] && return 1
+  done
+  return 0
+}
+
+# List candidate app names (anything with at least one cache dir). The name comes from the
+# path itself: $(basename) would drop a trailing line break and name another folder; and it
+# goes out through printf: echo would take a folder named -e or -n for an option.
 candidates() {
-  local n
+  local d n
   for d in "$A"/*/; do
-    n=$(basename "$d")
-    case "$n" in com.apple.*|Caches) continue;; esac
-    [ -n "$(paths_for "$n")" ] && echo "$n"
+    n=${d%/}; n=${n##*/}
+    app_name_ok "$n" || continue
+    [ "$n" = Caches ] && continue
+    [ -n "$(paths_for "$n")" ] && printf '%s\n' "$n"
   done
 }
 
-# Preview + optionally delete. $1=app  -> prints total KB reclaimed to stdout tail
+# Preview + optionally delete. $1=app  -> prints its total, in GB, last.
+# Returns 0 when it cleared (or would clear) something, 1 when there was nothing,
+# 3 when the app was skipped (running, or no way to tell), 4 when a delete failed
+# (rm's own error shown) or the name is not an app's. A dry run with no way to tell
+# what runs still shows the sizes: it deletes nothing. A cache reached through a link
+# inside the app's folder is left, and counted in OUTSIDE.
+OUTSIDE=0
 process_app() {
-  local app="$1" total=0 s k any=0
-  if is_running "$app"; then
-    printf "  %-24s %s\n" "$app" "SKIPPED — running"
-    return 0
+  local app="$1" total=0 s k any=0 failed=0
+  if ! app_name_ok "$app"; then
+    printf "  %-24s %s\n" "$app" "SKIPPED — $NAME_WHY"
+    return 4
+  fi
+  if is_running "$app" && ! { [ "$ASKED_DRY" -eq 1 ] && [ "$RUN_BLIND" -eq 1 ]; }; then
+    printf "  %-24s %s\n" "$app" "SKIPPED — $(skip_reason)"
+    return 3
   fi
   while IFS= read -r p; do
     [ -n "$p" ] || continue
+    if ! app_owned "$app" "$p"; then
+      printf "    left        %-46s %s\n" "${p#"$HOME"/Library/}" "leads outside $app's folder"
+      OUTSIDE=$((OUTSIDE + 1)); continue
+    fi
     k=$(ksize "$p"); [ "${k:-0}" -eq 0 ] && continue
-    any=1; total=$((total + k))
     s=$(hsize "$p")
     if [ "$DRY" -eq 1 ]; then
       printf "    would clear %-46s %s\n" "${p#"$HOME"/Library/}" "$s"
+      any=1; total=$((total + k))
+    elif ! app_owned "$app" "$p"; then   # again, right before the delete: a link made meanwhile
+      printf "    left        %-46s %s\n" "${p#"$HOME"/Library/}" "leads outside $app's folder"
+      OUTSIDE=$((OUTSIDE + 1))
+    elif rm -rf "$p"; then
+      printf "    cleared     %-46s %s\n" "${p#"$HOME"/Library/}" "$s"
+      any=1; total=$((total + k))
     else
-      rm -rf "$p" && printf "    cleared     %-46s %s\n" "${p#"$HOME"/Library/}" "$s"
+      failed=1
     fi
   done < <(paths_for "$app")
-  [ "$any" -eq 0 ] && { printf "  %-24s no caches\n" "$app"; return 0; }
-  printf "  %-24s %6.2f GB\n" "$app" "$(echo "scale=2;$total/1048576" | bc)"
+  # counted only what was (or would be) cleared: a folder left or not removed is not in the total
+  if [ "$any" -eq 0 ] && [ "$failed" -eq 0 ]; then printf "  %-24s no caches\n" "$app"; return 1; fi
+  [ "$any" -eq 1 ] && printf "  %-24s %6.2f GB\n" "$app" "$(echo "scale=2;$total/1048576" | bc)"
+  [ "$failed" -eq 0 ] || return 4
+}
+
+# ─── Claude (--claude only) ─────────────────────────────────────────────────
+# Opt-in because this script is usually launched FROM Claude Code, so Claude
+# is usually running. Top level + every partition's cache dirs; the native URL
+# cache; Claude Code's MCP logs (kept in ~/Library/Caches, which macOS itself
+# treats as purgeable). NUL-separated, so no folder name can split a path; a
+# symlinked partition is skipped, since it leads out of Claude's folder.
+claude_paths() {
+  local part d p
+  for d in "${CACHE_DIRS[@]}"; do
+    p="$A/Claude/$d"; [ -e "$p" ] && printf '%s\0' "$p"
+  done
+  for part in "$A/Claude/Partitions"/*; do
+    [ -d "$part" ] && [ ! -L "$part" ] || continue
+    for d in "${CACHE_DIRS[@]}"; do
+      p="$part/$d"; [ -e "$p" ] && printf '%s\0' "$p"
+    done
+  done
+  for p in "$C/Claude" "$C/com.anthropic.claudefordesktop" "$C/claude-cli-nodejs"; do
+    [ -e "$p" ] && printf '%s\0' "$p"
+  done
+}
+
+# The guard every --claude delete passes: the path's folder, followed to where
+# it really is, must be Claude's own folder or inside it — or the Caches folder,
+# for Claude's three entries there. A symlink on the way out fails it.
+CLAUDE_REAL=""; CACHES_REAL=""
+claude_owned() {
+  local p="$1" dir
+  dir=$(cd -P -- "$(dirname -- "$p")" 2>/dev/null && pwd -P) || return 1
+  [ -n "$CLAUDE_REAL" ] && case "$dir/" in "$CLAUDE_REAL"/*) return 0;; esac
+  [ -n "$CACHES_REAL" ] && [ "$dir" = "$CACHES_REAL" ] || return 1
+  case "${p##*/}" in Claude|com.anthropic.claudefordesktop|claude-cli-nodejs) return 0;; esac
+  return 1
+}
+
+# 0 = a Claude process runs · 1 = none · 2 = can't tell (ps failed or listed
+# nothing — e.g. inside Claude Code's sandbox, where ps is denied). A process
+# NAMED claude (the CLI, its daemon, "Claude", "Claude Helper …"), a command
+# run as …/claude, or one from the places Claude runs from. Never a bare
+# "claude" inside other words: this script's own `--claude` must not match.
+claude_running() {
+  local comms args
+  comms=$(ps -ww -Ao comm= 2>/dev/null) && [ -n "$comms" ] && sees_all "$comms" || return 2
+  args=$(ps -ww -Axo args= 2>/dev/null) && [ -n "$args" ] || return 2
+  printf '%s\n' "$comms" | sed 's|.*/||' | grep -qiE '^claude( .*)?$' && return 0
+  printf '%s\n' "$args" | grep -qiE '(^|/)claude( |$)' && return 0
+  printf '%s\n' "$args" | grep -qiF -e '/Applications/Claude.app/' \
+    -e 'Application Support/Claude/' -e '/.local/share/claude/' \
+    -e '@anthropic-ai/claude' && return 0
+  return 1
+}
+
+claude_block_reason() {
+  claude_running
+  case $? in
+    0) echo "Claude is running — quit Claude Desktop and every claude session, then run this from a plain terminal";;
+    2) echo "can't tell whether Claude is running (ps unavailable — e.g. inside Claude Code's sandbox)";;
+  esac
 }
 
 confirm() {
@@ -192,7 +380,8 @@ confirm() {
   [ "$DRY" -eq 1 ] && return 1
   local a=""
   printf "\nProceed? [y/N] "
-  read -r a </dev/tty 2>/dev/null || { echo "(no tty — aborting; use -f to force)"; return 1; }
+  # The braces take the redirect's own failure too: no terminal, no stray error line.
+  { read -r a </dev/tty; } 2>/dev/null || { echo "(no tty — aborting; use -f to force)"; return 1; }
   case "$a" in y|Y|yes) return 0;; *) echo "Aborted."; return 1;; esac
 }
 
@@ -202,10 +391,85 @@ for a in "$@"; do
     -h|--help|help) show_help; exit 0;;
     -n|--dry-run|dry-run) DRY=1;;
     -f|--force|force) FORCE=1;;
-    -*) echo "clearCache: unknown option $a (try --help)" >&2; exit 1;;
-    *) TARGET="$a";;
+    -c|--claude) CLAUDE=1;;   # no bare "claude": it is also an app name
+    -*) status fail "unknown option $a (try --help)"; exit 1;;
+    *) [ -z "$TARGET" ] || { status fail "one app at a time — got '$TARGET' and '$a'"; exit 1; }
+       TARGET="$a";;
   esac
 done
+
+ASKED_DRY=$DRY # the person's -n: a preview before a real run sets DRY for itself
+
+# ─── Guards, every mode ─────────────────────────────────────────────────────
+# HOME must be this user's folder: named from the root, really a folder, and not the
+# root itself — else every path below would point at someone else's Library, or none.
+case "$HOME" in /?*) ;; *) status fail "HOME is not an absolute folder ('$HOME') — refusing"; exit 1;; esac
+case "$HOME" in *$'\n'*) status fail "HOME holds a line break — refusing"; exit 1;; esac
+case "/$HOME/" in */../*|*/./*) status fail "HOME steps through '.' or '..' ('$HOME') — refusing"; exit 1;; esac
+HOME_REAL=$(cd -P -- "$HOME" 2>/dev/null && pwd -P) || HOME_REAL=""
+# missing, only slashes (the root), or someone else's
+if [ -z "$HOME_REAL" ] || [ -z "${HOME_REAL//\//}" ] || [ ! -O "$HOME_REAL" ]; then
+  status fail "HOME is not this user's folder ('$HOME') — refusing"
+  exit 1
+fi
+# An app is asked for by name (app_name_ok): never a path, a line break or Apple's own.
+if [ -n "$TARGET" ] && ! app_name_ok "$TARGET"; then status fail "'$TARGET': $NAME_WHY"; exit 1; fi
+
+# ─── --claude ───────────────────────────────────────────────────────────────
+if [ "$CLAUDE" -eq 1 ]; then
+  if [ -n "$TARGET" ]; then
+    status fail "--claude takes no app name — drop '$TARGET'"
+    exit 1
+  fi
+  CLAUDE_REAL=$(cd -P -- "$A/Claude" 2>/dev/null && pwd -P) || CLAUDE_REAL=""
+  CACHES_REAL=$(cd -P -- "$C" 2>/dev/null && pwd -P) || CACHES_REAL=""
+  echo "Claude caches (never sign-ins, chats, the VM or ~/.claude):"
+  # One list, read once: what is shown is exactly what is deleted.
+  paths=(); total=0
+  while IFS= read -r -d '' p; do
+    if ! claude_owned "$p"; then
+      printf "    skipped     %s — leads outside Claude's folder\n" "${p#"$HOME"/Library/}"
+      continue
+    fi
+    k=$(ksize "$p"); [ "${k:-0}" -eq 0 ] && continue
+    paths+=("$p"); total=$((total + k))
+    printf "    would clear %-46s %s\n" "${p#"$HOME"/Library/}" "$(hsize "$p")"
+  done < <(claude_paths)
+  if [ "$total" -eq 0 ]; then status warn "no Claude caches to clear"; exit 0; fi
+  printf "  %-24s %6.2f GB\n" "Claude" "$(echo "scale=2;$total/1048576" | bc)"
+  why=$(claude_block_reason)
+  if [ "$DRY" -eq 1 ]; then
+    status warn "dry run — nothing deleted${why:+; a real run would refuse: $why}"
+    exit 0
+  fi
+  [ -n "$why" ] && { status fail "refusing — $why"; exit 1; }
+  confirm || { status warn "cancelled — nothing deleted"; exit 0; }
+  # Re-check: Claude may have been opened while the prompt waited.
+  why=$(claude_block_reason)
+  [ -n "$why" ] && { status fail "refusing — $why"; exit 1; }
+  echo
+  failed=0
+  for p in "${paths[@]}"; do
+    # Each delete checks again: Claude may start while a large cache goes.
+    why=$(claude_block_reason)
+    [ -n "$why" ] && { status fail "stopped — $why; the rest is left"; exit 1; }
+    if ! claude_owned "$p"; then
+      printf "    not cleared %s — it now leads outside Claude's folder\n" "${p#"$HOME"/Library/}" >&2
+      failed=1; continue
+    fi
+    s=$(hsize "$p")
+    if rm -rf "$p"; then printf "    cleared     %-46s %s\n" "${p#"$HOME"/Library/}" "$s"
+    else failed=1
+    fi
+  done
+  [ "$failed" -eq 1 ] && { status fail "some Claude caches were not removed — see errors above"; exit 1; }
+  status ok "Claude caches cleared — they rebuild on next launch"
+  exit 0
+fi
+# Reached only when an error broke out of the block above (an arithmetic one; an
+# unset variable ends the script itself, non-zero): never fall through into the
+# other modes.
+if [ "$CLAUDE" -eq 1 ]; then status fail "--claude stopped on an error above"; exit 1; fi
 
 # ─── Guided mode (no args) ──────────────────────────────────────────────────
 if [ -z "$TARGET" ]; then
@@ -215,16 +479,19 @@ if [ -z "$TARGET" ]; then
   echo "Scanning…"
   echo
   # Summary only — one line per app, largest first. process_app is per-path
-  # verbose by design, so here we total the sizes ourselves.
+  # verbose by design, so here we total the sizes ourselves. It deletes nothing, so
+  # with no way to tell what runs it still shows every size.
+  snapshot_running
   tmp=$(mktemp); total=0
   while IFS= read -r app; do
     [ -n "$app" ] || continue
-    if is_running "$app"; then
-      printf "%12d|  %-26s %s\n" 0 "$app" "skipped — running" >> "$tmp"; continue
+    if [ "$RUN_BLIND" -eq 0 ] && is_running "$app"; then
+      printf "%12d|  %-26s %s\n" 0 "$app" "skipped — $(skip_reason)" >> "$tmp"; continue
     fi
     sum=0
     while IFS= read -r p; do
       [ -n "$p" ] || continue
+      app_owned "$app" "$p" || continue
       k=$(ksize "$p"); sum=$((sum + k))
     done < <(paths_for "$app")
     [ "$sum" -lt 1024 ] && continue
@@ -232,7 +499,7 @@ if [ -z "$TARGET" ]; then
     printf "%12d|  %-26s %6.2f GB\n" "$sum" "$app" "$(echo "scale=2;$sum/1048576" | bc)" >> "$tmp"
   done < <(candidates)
 
-  if [ ! -s "$tmp" ]; then rm -f "$tmp"; echo "  nothing to clear."; exit 0; fi
+  if [ ! -s "$tmp" ]; then rm -f "$tmp"; status warn "nothing to clear"; exit 0; fi
   sort -rn -t'|' -k1 "$tmp" | cut -d'|' -f2-
   rm -f "$tmp"
   printf "\n  %-26s %6.2f GB reclaimable\n" "TOTAL" "$(echo "scale=2;$total/1048576" | bc)"
@@ -242,20 +509,49 @@ if [ -z "$TARGET" ]; then
   echo "  clearCache all     clear every closed app"
   echo "  clearCache <App> -n  preview without deleting"
   echo "  clearCache --help  full detail on what is and is not removed"
+  if [ "$RUN_BLIND" -eq 1 ]; then status warn "can't tell what's running (ps unavailable) — sizes shown, but a real run skips every app"
+  else status ok "scan done — nothing deleted"
+  fi
   exit 0
 fi
 
 # ─── all ────────────────────────────────────────────────────────────────────
 if [ "$TARGET" = "all" ] || [ "$TARGET" = "All" ] || [ "$TARGET" = "ALL" ]; then
+  if [ -z "$(candidates)" ]; then status warn "nothing to clear"; exit 0; fi
   echo "Scanning every app (running ones are skipped)…"
   saved=$DRY; DRY=1
-  list=$(while IFS= read -r app; do process_app "$app" 2>/dev/null; done < <(candidates))
+  snapshot_running   # one reading for the preview (its subshell inherits it) and the line below
+  list=$(while IFS= read -r app; do [ -n "$app" ] || continue; process_app "$app" 2>/dev/null; done < <(candidates))
   echo "$list"
   DRY=$saved
-  [ "$DRY" -eq 1 ] && exit 0
-  confirm || exit 0
+  if [ "$DRY" -eq 1 ]; then
+    if [ "$RUN_BLIND" -eq 1 ]; then status warn "dry run — nothing deleted; can't tell what's running (ps unavailable), so a real run would skip every app"
+    else status warn "dry run — nothing deleted; drop -n to clear"
+    fi
+    exit 0
+  fi
+  if ! grep -q "would clear" <<< "$list"; then
+    status warn "nothing to clear now — why is beside each app above"
+    exit 0
+  fi
+  confirm || { status warn "cancelled — nothing deleted"; exit 0; }
   echo
-  while IFS= read -r app; do process_app "$app" 2>/dev/null; done < <(candidates)
+  # What runs is read afresh before each app, so one opened while the prompt waited, or
+  # while an earlier app's caches went, is skipped. rm's own errors show.
+  cleared=0; skipped=0; blind=0; failed=0
+  while IFS= read -r app; do
+    [ -n "$app" ] || continue
+    snapshot_running
+    rc=0; process_app "$app" || rc=$?
+    case "$rc" in 0) cleared=$((cleared + 1));; 1) ;; 3) skipped=$((skipped + 1)); blind=$((blind + RUN_BLIND));; *) failed=$((failed + 1));; esac
+  done < <(candidates)
+  note=""; [ "$OUTSIDE" -gt 0 ] && note="; $OUTSIDE folder(s) left — they lead outside their app's folder"
+  if [ "$failed" -gt 0 ]; then status fail "caches of $failed app(s) were not all removed — see errors above"; exit 1
+  elif [ "$skipped" -gt 0 ]; then status warn "cleared $cleared app(s); $skipped skipped — $(skips_why "$skipped" "$blind")$note"
+  elif [ "$cleared" -eq 0 ]; then status warn "nothing cleared$note"
+  elif [ -n "$note" ]; then status warn "cleared $cleared app(s)$note"
+  else status ok "caches cleared for $cleared app(s)"
+  fi
   exit 0
 fi
 
@@ -265,34 +561,62 @@ DIRS=$(support_dirs_for "$TARGET" | sort -u)
 [ -d "$C/$TARGET" ] && [ -z "$DIRS" ] && DIRS="$TARGET"
 
 if [ -z "$DIRS" ]; then
-  echo "clearCache: no cache folders found for '$TARGET'." >&2
   [ -n "$APP_PATH" ] && echo "  (found $APP_PATH — but it keeps no caches)" >&2
   echo "Apps with caches right now:" >&2
   candidates | sed 's/^/  /' >&2
+  status fail "no cache folders found for '$TARGET'"
   exit 1
 fi
 
-# Strongest signal in single-app mode: the resolved bundle itself is live.
-if [ -n "$APP_PATH" ]; then
-  snapshot_running
-  if printf '%s\n' "$RUN_ARGS" | grep -qiF "$APP_PATH/"; then
-    echo "clearCache: $TARGET is RUNNING — quit it first." >&2
-    exit 1
+# One app asked for by name, and it must be closed: refused when it runs (by its name,
+# or its bundle live), or when there is no way to tell. A dry run deletes nothing, so it
+# goes on to show the sizes, saying what a real run would do.
+running_why() {
+  if [ "$RUN_BLIND" -eq 1 ]; then echo "can't tell whether $TARGET is running (ps unavailable)"
+  elif is_running "$TARGET"; then echo "$TARGET is running — quit it first"
+  elif [ -n "$APP_PATH" ] && printf '%s\n' "$RUN_ARGS" | grep -qiF "$APP_PATH/"; then echo "$TARGET is running — quit it first"
   fi
-fi
+}
+snapshot_running
+why=$(running_why)
+if [ -n "$why" ] && [ "$DRY" -eq 0 ]; then status fail "refusing — $why"; exit 1; fi
 
 [ -n "$APP_PATH" ] && echo "App:     $APP_PATH${BID:+  ($BID)}"
-echo "Folders: $(echo "$DIRS" | tr '\n' ' ')"
+echo "Folders: $(printf '%s\n' "$DIRS" | tr '\n' ' ')"
 echo
 saved=$DRY; DRY=1
 echo "Preview:"
 while IFS= read -r d; do [ -n "$d" ] && process_app "$d" 2>/dev/null; done <<< "$DIRS"
 DRY=$saved
 if [ "$DRY" -eq 1 ]; then
-  status warn "dry run — nothing deleted; drop -n to clear"
+  if [ -n "$why" ]; then status warn "dry run — nothing deleted; a real run would refuse: $why"
+  else status warn "dry run — nothing deleted; drop -n to clear"
+  fi
   exit 0
 fi
 confirm || { status warn "cancelled — nothing deleted"; exit 0; }
+# Read what runs again: the app may have been opened while the prompt waited.
+snapshot_running
+why=$(running_why)
+if [ -n "$why" ]; then status fail "refusing — $why"; exit 1; fi
 echo
-while IFS= read -r d; do [ -n "$d" ] && process_app "$d" 2>/dev/null; done <<< "$DIRS"
-status ok "caches cleared for ${APP:-the selected app}"
+cleared=0; skipped=0; failed=0; OUTSIDE=0   # the preview counted its own
+while IFS= read -r d; do
+  [ -n "$d" ] || continue
+  # Before each folder, what runs is read again: the app asked for, opened meanwhile (or no way
+  # left to tell) stops the run, as --claude's does; a folder a bundle ID's vendor brought in is
+  # skipped while its own app runs.
+  snapshot_running
+  why=$(running_why)
+  [ -n "$why" ] && { status fail "stopped — $why; the rest is left"; exit 1; }
+  rc=0; process_app "$d" || rc=$?
+  case "$rc" in 0) cleared=$((cleared + 1));; 1) ;; 3) skipped=$((skipped + 1));; *) failed=$((failed + 1));; esac
+done <<< "$DIRS"
+note=""; [ "$OUTSIDE" -gt 0 ] && note="; $OUTSIDE folder(s) left — they lead outside its folder"
+if [ "$failed" -gt 0 ]; then status fail "caches for $TARGET were not all removed — see errors above"; exit 1
+elif [ "$skipped" -gt 0 ] && [ "$cleared" -gt 0 ]; then status warn "$TARGET partly cleared — $skipped folder(s) skipped: running$note"
+elif [ "$skipped" -gt 0 ]; then status warn "$TARGET skipped — running; its caches are kept$note"
+elif [ "$cleared" -eq 0 ]; then status warn "nothing to clear for $TARGET$note"
+elif [ -n "$note" ]; then status warn "$TARGET partly cleared$note"
+else status ok "caches cleared for $TARGET"
+fi

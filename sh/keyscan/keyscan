@@ -1,0 +1,736 @@
+#!/usr/bin/env bash
+# (c) Shrix
+# author: shrix
+# keyscan — find secrets before they go out: key-shaped values (private keys,
+# AWS, GitHub, Slack, OpenAI, Anthropic, Stripe, SendGrid, GitLab, npm, Google,
+# JWTs, OpenRouter, Langfuse, Telegram bots, Slack/Discord webhooks,
+# SECRET_KEY=…, Bearer tokens) and secret-named files (.env, *.pem, *.key,
+# id_rsa, credentials.json, …). Read-only. A hit is shown as where it is, its
+# first 4 characters and [the rules that matched it], never the value.
+# With gitleaks installed its ~200 rules run too, in every mode (encoded
+# values decoded), with values hidden; a place both find is shown once.
+#
+# Usage: keyscan [path...]        the files under each path (default: .); in a
+#                                 git repo the files git would commit (tracked,
+#                                 and untracked but not ignored); a file or a
+#                                 symlink named outright is always scanned
+#        keyscan -a|--all [path]  every file, ignored ones too
+#        keyscan -s|--staged      the lines staged for the next commit
+#        keyscan -H|--history     every line ever added, in every commit of every
+#                                 branch, stashes and merge resolutions included
+#        keyscan -H --range B..H  only the commits in that range
+#        keyscan -                standard input, binary included
+#        keyscan --mask FILE      FILE with every line holding a match replaced by
+#                                 ‹redacted:rule› (whole private-key blocks too);
+#                                 honours no skip; prints nothing and exits 1 if
+#                                 gitleaks is missing (unless --no-engines), cannot
+#                                 run, or its report cannot be trusted
+#        keyscan --strict …       honour no allow marker and no .gitleaksignore
+#                                 (paths and - only)
+#        keyscan --json …         one JSON object per hit or note, then a summary;
+#                                 the status line goes to stderr
+#        keyscan --no-engines …   keyscan's own patterns only, no gitleaks
+#        keyscan -h|--help|help
+#
+# Exit: 0 clean · 1 a hit, or something it could not read or run · 2 the scan
+# could not run (a missing path, not a repo, git or grep failing outright).
+# Skipped, and counted on the closing line: a line holding "keyscan:allow",
+# "secscan:allow" or "gitleaks:allow" (fake keys in test fixtures); a
+# documented example key (one ending in EXAMPLE, as AWS's docs use); a place
+# listed in .gitleaksignore at the repo's top (outside git: the current
+# folder), whatever rule caught it — one gitleaks fingerprint per line:
+# file:rule:line, or commit:file:rule:line for a history hit (file:rule:line
+# skips that place in every commit, as gitleaks reads it). A .gitleaks.toml
+# inside the scanned folder is not read (GITLEAKS_CONFIG / GITLEAKS_CONFIG_TOML,
+# when set, apply); gitleaks itself may still honour a .gitleaksignore at a
+# scanned folder's top whose entries hold absolute paths — under --strict that
+# file is a hit.
+# Git's own settings never narrow a scan: names are read from the repo's top,
+# whatever diff.relative, log.showRoot, diff.noprefix or .gitattributes say.
+# Paths mode decodes UTF-16 text (with its byte-order mark) and scans it; other
+# binary files are not read, and the closing line counts them; a nested
+# repository or submodule is not scanned, and is counted too — scan it on its own.
+# --json names every file exactly (control bytes as \u00XX); text output shows them as ?.
+# The first signature list is a verbatim copy of ~/.claude/hooks/secret-patterns.sh,
+# the rest push's and pushlog's extras and keyscan's own;
+# ~/.agents/tests/skills/pushlog/test_secret_patterns.sh fails when a copy falls behind.
+
+set -uo pipefail
+export LC_ALL=C   # match bytes: in a UTF-8 locale grep passes over a line holding a byte that is not UTF-8
+_gap() { [ -t 1 ] && printf '\n'; return 0; }
+trap _gap EXIT
+here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+if [ -f "$here/proj-env.sh" ]; then
+    # shellcheck source=/dev/null
+    . "$here/proj-env.sh"
+else   # the shared helper's status line, for a copy run on its own
+    status() { case "$1" in ok) printf '✓ %s\n' "$2" ;; fail) printf '✗ %s\n' "$2" >&2 ;; *) printf '⚠ %s\n' "$2" ;; esac; }
+fi
+
+KEYSCAN_PATTERNS=(
+    -e '-----BEGIN (RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY( BLOCK)?-----|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|github_pat_[0-9A-Za-z_]{20,}|gh[pousr]_[0-9A-Za-z]{20,}|xox[baprs]-[0-9A-Za-z-]{10,}|sk-ant-[A-Za-z0-9_-]{20,}|sk-proj-[A-Za-z0-9_-]{20,}|(^|[^a-z]|\\[nrt]|%[0-9A-Fa-f]{2}|\[[0-9;]*m)sk-[A-Za-z0-9]{32,}|sk-(svcacct|admin)-[A-Za-z0-9_-]{20,}T3BlbkFJ[A-Za-z0-9_-]{20,}|(sk|rk)_live_[0-9A-Za-z]{16,}|SG\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}|glpat-[0-9A-Za-z_-]{20,}|npm_[0-9A-Za-z]{36,}|AIza[0-9A-Za-z_-]{35}|GOCSPX-[0-9A-Za-z_-]{20,}|eyJ[A-Za-z0-9_-]{15,}\.eyJ[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{30,}|sk-or-v1-[0-9a-f]{64}|sk-lf-[0-9a-f]{8}-[0-9a-f-]{12,}'
+    -e 'sk_test_[A-Za-z0-9]{10,}'
+    -e '(SECRET|PRIVATE)_?KEY[ =:"]+[A-Za-z0-9/+_-]{15,}'
+    -e '(^|[^a-z])sk-[A-Za-z0-9_-]{20,}'
+    -e 'Bearer [A-Za-z0-9_.-]{20,}'
+    -e '[0-9]{8,10}:AA[0-9A-Za-z_-]{33}'
+    -e 'hooks\.slack\.com/services/T[0-9A-Z]{8,}/B[0-9A-Z]{8,}/[0-9A-Za-z]{20,}'
+    -e 'discord(app)?\.com/api/webhooks/[0-9]{17,20}/[0-9A-Za-z_-]{60,}'
+    -e '-----BEGIN ([A-Z0-9]+ )+PRIVATE KEY( BLOCK)?-----'
+)
+# Names that hold secrets whatever is in them (push's list); templates pass.
+SECRET_NAME='(^|/)\.env($|\.)|\.pem$|\.key$|\.crt$|\.p12$|\.pfx$|credentials\.json$|credentials\.ya?ml$|secrets\.ya?ml$|(^|/)id_rsa$|(^|/)id_ed25519$|(^|/)\.netrc$'
+TEMPLATE_NAME='(^|/)\.env\.(example|sample|template|dist)$'
+GREP=${KEYSCAN_GREP:-/usr/bin/grep}
+GITLEAKS=${KEYSCAN_GITLEAKS-$(command -v gitleaks 2>/dev/null)}   # set it empty to leave gitleaks out
+# gitleaks reports only where and which rule, in fields split by \037, never the value.
+GL_TMPL='{{len .}}{{"\n"}}{{range .}}{{.Commit}}{{"\x1f"}}{{.File}}{{"\x1f"}}{{.StartLine}}{{"\x1f"}}{{.RuleID}}{{"\n"}}{{end}}'
+# --mask needs each span: start and end line and column, and the rule.
+GL_SPAN_TMPL='{{len .}}{{"\n"}}{{range .}}{{.StartLine}}{{"\x1f"}}{{.StartColumn}}{{"\x1f"}}{{.EndLine}}{{"\x1f"}}{{.EndColumn}}{{"\x1f"}}{{.RuleID}}{{"\n"}}{{end}}'
+# Every diff read as text, from the repo's top, whatever the user's git config says.
+DIFF_OPTS=(-U0 --no-color --no-ext-diff --text --no-textconv --no-relative --src-prefix=a/ --dst-prefix=b/)
+
+work=$(mktemp -d) || { printf '✗ could not scan: no temp folder\n' >&2; exit 2; }
+trap 'rm -rf "$work"; _gap' EXIT
+: > "$work/found"; : > "$work/eng"; : > "$work/allowed"; mkdir -p "$work/noignore"
+
+hits=0 skipped=0 examples=0 ignored=0 engines=1 engine_ran=0 strict=0 json=0 notread=0 nested=0
+places=()          # where the hits are: one entry per file, or per commit and file
+seen() { local p; for p in "${places[@]+"${places[@]}"}"; do [ "$p" = "$1" ] && return 0; done; places+=("$1"); }
+secret_named() { [[ $1 =~ $SECRET_NAME ]] && ! [[ $1 =~ $TEMPLATE_NAME ]]; }   # no process per name
+allowed() { [ "$strict" = 0 ] && [[ $1 == *keyscan:allow* || $1 == *secscan:allow* || $1 == *gitleaks:allow* ]]; }
+# --json: a string as a JSON string literal, lossless: backslash and quote escaped, every
+# other control byte as \u00XX, so a reader can map a name back to its file.
+jstr() {
+    printf '%s' "$1" | awk 'BEGIN { for (i = 1; i < 32; i++) e[sprintf("%c", i)] = sprintf("\\u%04x", i); e[sprintf("%c", 127)] = "\\u007f"
+                                    e["\\"] = "\\\\"; e["\""] = "\\\""; e["\t"] = "\\t"; e["\r"] = "\\r" }
+        { s = ""; n = length($0)
+          for (i = 1; i <= n; i++) { c = substr($0, i, 1); s = s ((c in e) ? e[c] : c) }
+          printf "%s%s", (NR > 1 ? "\\n" : ""), s }' | { printf '"'; cat; printf '"'; }
+}
+vis() { printf '%s' "$1" | tr '\001-\037\177' '?'; }   # text output: no control byte reaches the terminal
+skip_line() {   # skip_line <commit or -> <file> <line>: a line marked allow, counted once whichever rule saw it
+    local k="$1"$'\037'"$2"$'\037'"$3"
+    $GREP -q -x -F -- "$k" "$work/allowed" && return 0
+    printf '%s\n' "$k" >> "$work/allowed"; skipped=$((skipped + 1))
+}
+# The rule a match of keyscan's own patterns comes from, named as gitleaks names it where it has one.
+rule_of() {
+    case $1 in
+        -----BEGIN*) echo private-key ;;
+        AKIA*|ASIA*) echo aws-access-token ;;
+        github_pat_*) echo github-fine-grained-pat ;;
+        ghp_*) echo github-pat ;;
+        gho_*) echo github-oauth ;;
+        ghu_*|ghs_*) echo github-app-token ;;
+        ghr_*) echo github-refresh-token ;;
+        xox*) echo slack-token ;;
+        sk-ant-*) echo anthropic-api-key ;;
+        sk-or-v1-*) echo openrouter-api-key ;;
+        sk-lf-*) echo langfuse-secret-key ;;
+        sk-proj-*|sk-svcacct-*|sk-admin-*) echo openai-api-key ;;
+        sk_live_*|rk_live_*|sk_test_*) echo stripe-access-token ;;
+        SG.*) echo sendgrid-api-token ;;
+        glpat-*) echo gitlab-pat ;;
+        npm_*) echo npm-access-token ;;
+        AIza*) echo gcp-api-key ;;
+        GOCSPX-*) echo google-oauth-client-secret ;;
+        eyJ*) echo jwt ;;
+        Bearer*) echo bearer-token ;;
+        hooks.slack.com*) echo slack-webhook-url ;;
+        discord*) echo discord-webhook ;;
+        SECRET*|PRIVATE*) echo secret-key-assignment ;;
+        [0-9]*) echo telegram-bot-api-token ;;
+        *) if [[ $1 =~ ^sk-[A-Za-z0-9]{32,}$ ]]; then echo openai-api-key; else echo sk-key; fi ;;
+    esac
+}
+# A hit of keyscan's own patterns, kept for the merge: where it is, the
+# match's first 4 characters (never the value) and its rule. A line whose
+# matches are all documented example keys is no hit.
+hit_line() {   # hit_line <commit or -> <file> <line> <text>
+    local m="" ms real=0 lm rule=keyscan
+    ms=$(printf '%s\n' "$4" | $GREP -a -o -E "${KEYSCAN_PATTERNS[@]}" 2>/dev/null)
+    if [ -n "$ms" ]; then   # none read back (a NUL in the line): still a hit, unnamed
+        while IFS= read -r m; do
+            m=${m#"${m%%[A-Za-z0-9-]*}"}   # the sk- rule can take the character before the key
+            [[ $m == *EXAMPLE ]] || { real=1; break; }
+        done <<< "$ms"
+        if [ "$real" = 0 ]; then examples=$((examples + 1)); return; fi
+        lm=$m; [[ $m =~ ^[^s]{1,3}(sk-.*)$ ]] && lm=${BASH_REMATCH[1]}   # named by the key, not what came before it
+        rule=$(rule_of "$lm")
+    fi
+    printf '%s\037%s\037%s\037%s\037%s\n' "$1" "$2" "$3" "${m:0:4}" "$rule" >> "$work/found"
+}
+hit_note() {   # hit_note <place> <reason>: a hit that is not a match — a name, something unread or unrun
+    if [ "$json" = 1 ]; then
+        local note=${2%%:*}
+        printf '{"note":%s,"place":%s,"reason":%s}\n' "$(jstr "$note")" "$(jstr "$1")" "$(jstr "$2")"
+    else
+        printf '%s  (%s)\n' "$(vis "$1")" "$(vis "$2")"
+    fi
+    hits=$((hits + 1)); seen "$1"
+}
+cannot() { status fail "could not scan: $1"; exit 2; }
+# grep's verdict: 0 matched, 1 none; anything else means it did not read everything.
+grep_ran() { [ "$1" -le 1 ] || cannot "grep failed: $(head -1 "$work/grep.err" 2>/dev/null)"; }
+first_err() { awk '{ gsub(/\033\[[0-9;]*m/, ""); print; exit }' "$1"; }   # an engine's first message, colour codes dropped
+
+# The added lines of a diff stream (git log -p / git diff, -U0), as
+# "<commit>\t<file>\t<line>\t<text>"; <commit> is "-" for a staged diff. Hunk
+# lengths decide what is content, so an added line that starts with "++" is
+# never read as a file header.
+added_lines() {
+    awk 'BEGIN { c = "-" }
+      left > 0 {
+        ch = substr($0, 1, 1)
+        if (ch == "\\") next
+        left--
+        if (ch == "+" && f != "") print c "\t" f "\t" n++ "\t" substr($0, 2)
+        next
+      }
+      substr($0, 1, 1) == "\001" { c = substr($0, 2); f = ""; next }
+      /^diff --git / { f = ""; next }
+      /^\+\+\+ / {
+        p = substr($0, 5); sub(/\t$/, "", p)      # git ends a name holding a space with a tab
+        if (substr(p, 1, 1) == "\"") p = substr(p, 2, length(p) - 2)   # and quotes an odd one
+        if (p == "/dev/null") f = ""; else { sub(/^b\//, "", p); f = p }
+        next
+      }
+      /^@@ / {
+        split($0, h, " "); o = h[2]; w = h[3]; sub(/^-/, "", o); sub(/^\+/, "", w)
+        ob = index(o, ",") ? substr(o, index(o, ",") + 1) + 0 : 1
+        nb = index(w, ",") ? substr(w, index(w, ",") + 1) + 0 : 1
+        n = (index(w, ",") ? substr(w, 1, index(w, ",") - 1) : w) + 0
+        left = ob + nb
+        next
+      }'
+}
+
+# Scan the added lines in $work/records (added_lines' output), in this shell so
+# its counts stand: narrowed by one grep over them all, then each candidate
+# checked on its own text (the match may have been in the name).
+scan_records() {
+    local c f n t rc
+    $GREP -a -E "${KEYSCAN_PATTERNS[@]}" "$work/records" > "$work/cand" 2> "$work/grep.err"; rc=$?
+    grep_ran "$rc"
+    while IFS=$'\t' read -r c f n t; do
+        printf '%s\n' "$t" | $GREP -a -q -E "${KEYSCAN_PATTERNS[@]}" || continue
+        if allowed "$t"; then skip_line "$c" "$f" "$n"; continue; fi
+        hit_line "$c" "$f" "$n" "$t"
+    done < "$work/cand"
+}
+
+# Run git into a file; git failing fails the scan.
+git_to() {   # git_to <file> <git args...>
+    local out=$1; shift
+    git -c core.quotePath=false "$@" > "$out" 2> "$work/git.err" || cannot "git $1: $(head -1 "$work/git.err")"
+}
+
+# A path git or find could not read, from its message: find's middle part, or
+# what git quotes (first quote to last, so a name holding a quote stays whole).
+unread_path() {
+    local m=$1
+    if [[ $m == find:\ * ]]; then m=${m#find: }; m=${m%: *}
+    elif [[ $m == *\'*\'* ]]; then m=${m#*\'}; m=${m%\'*}; m=${m%/}; fi
+    printf '%s' "${m#./}"
+}
+
+# Every added line of the history, as added_lines records: one pass reads each
+# commit and each merge by what its resolution added; remerge-diff skips a
+# commit with three or more parents (a stash -u, an octopus merge), so a second
+# pass reads those against their first parent. NULs become spaces, since awk
+# ends a line at one.
+history_records() {
+    local pass
+    : > "$work/records"
+    for pass in "--remerge-diff" "--min-parents=3 --diff-merges=first-parent"; do
+        # shellcheck disable=SC2086
+        git -c core.quotePath=false log "${REVS[@]}" --root $pass -p "${DIFF_OPTS[@]}" --format=$'\001%h' 2> "$work/git.err" \
+            | tr '\0' ' ' | added_lines >> "$work/records"
+        [ "${PIPESTATUS[0]}" = 0 ] || cannot "git log: $(head -1 "$work/git.err")"
+    done
+}
+
+# Every name a file was ever added under (a rename or a copy is an add here),
+# with the same two passes as history_records, as "<commit>\t<name>".
+history_names() {
+    local pass
+    : > "$work/names"
+    for pass in "--remerge-diff" "--min-parents=3 --diff-merges=first-parent"; do
+        # shellcheck disable=SC2086
+        git -c core.quotePath=false log "${REVS[@]}" --root --no-renames --diff-filter=A $pass --no-relative \
+            --format=$'\001%h' --name-only >> "$work/names" 2> "$work/git.err" \
+            || cannot "git log: $(head -1 "$work/git.err")"
+    done
+}
+
+explicit=$'\n'   # files named outright, one per line: scanned even as symlinks
+# Every file under the paths given: git's view in a repo, all files otherwise.
+list_files() {   # list_files <all 0|1> <path...>: NUL-separated paths
+    local all=$1 p f q top; shift
+    for p in "$@"; do
+        if [ -f "$p" ]; then printf '%s\0' "${p#./}"; explicit+="${p#./}"$'\n'; continue; fi
+        [ -d "$p" ] || cannot "no such path: $(vis "$p")"
+        top=$(git -C "$p" rev-parse --show-toplevel 2>/dev/null)
+        if [ "$all" = 0 ] && [ -n "$top" ]; then
+            git -C "$p" ls-files -z -c -o --exclude-standard 2>> "$work/list.err" \
+                | while IFS= read -r -d '' f; do q="$p/$f"; printf '%s\0' "${q#./}"; done
+        else
+            find -H "$p" -name .git -prune -o -type f -print0 2>> "$work/list.err" \
+                | while IFS= read -r -d '' f; do printf '%s\0' "${f#./}"; done
+        fi
+    done
+}
+
+# The files grep -I passed over (empty ones aside) are looked at once more: UTF-16 and UTF-32
+# text (with its byte-order mark) is decoded and scanned; any other binary file is searched
+# raw for keyscan's own patterns and counted as not read, since its text cannot be trusted.
+scan_wide() {   # scan_wide <file> <text to grep>: hits of keyscan's own patterns, named by <file>
+    local f=$1 n t rest rc
+    $GREP -a -n -E "${KEYSCAN_PATTERNS[@]}" -- "$2" > "$work/wide.out" 2> "$work/wide.err"; rc=$?
+    [ "$rc" -le 1 ] || { hit_note "$f" "could not scan: $(head -1 "$work/wide.err")"; return; }
+    while IFS= read -r rest; do
+        n=${rest%%:*}; t=${rest#*:}
+        if allowed "$t"; then skip_line "-" "$f" "$n"; continue; fi
+        hit_line "-" "$f" "$n" "$t"
+    done < "$work/wide.out"
+}
+staged_wide() {   # a staged file git counts as binary: UTF-16 or UTF-32 text in it is decoded and scanned
+    local rec f i=0 d enc
+    while IFS= read -r -d '' rec; do
+        case $rec in "-"$'\t'"-"$'\t'*) f=${rec#-$'\t'-$'\t'} ;; *) continue ;; esac
+        command -v file > /dev/null 2>&1 || { hit_note "$f" "could not scan: file is not installed to read its encoding"; continue; }
+        i=$((i + 1)); d="$work/sw.$i"
+        git cat-file blob ":$f" > "$d" 2> /dev/null || { hit_note "$f" "could not scan: its staged copy"; continue; }
+        enc=$(file -b --mime-encoding "$d" 2> /dev/null)
+        case $enc in utf-16*|utf-32*)
+            if iconv -f "$(printf '%s' "${enc%%[lb]e}" | tr 'a-z' 'A-Z')" -t UTF-8 < "$d" > "$d.u" 2> /dev/null; then scan_wide "$f" "$d.u"
+            else hit_note "$f" "could not scan: $enc text that does not decode"; fi ;;
+        esac
+    done < "$work/numstat"
+}
+scan_encodings() {
+    local f enc i=0 d line
+    : > "$work/passed"
+    # grep -I leaves a file it treats as binary out of every output, -c included: those are the ones it passed over
+    xargs -0 $GREP -I -c -e '' -- < "$work/readable" 2> "$work/grepc.err" | sed 's/:[0-9]*$//' > "$work/textual"
+    while IFS= read -r line; do [ -n "$line" ] && hit_note "${line#*grep: }" "could not scan"; done < "$work/grepc.err"
+    tr '\0' '\n' < "$work/readable" | $GREP -v -x -F -f "$work/textual" > "$work/nolines"
+    while IFS= read -r f; do [ -s "$f" ] && printf '%s\0' "$f" >> "$work/passed"; done < "$work/nolines"
+    [ -s "$work/passed" ] || return 0
+    if ! command -v file > /dev/null 2>&1; then hit_note file "could not check encodings: file is not installed"; return 0; fi
+    xargs -0 file -0 --mime-encoding -- < "$work/passed" > "$work/enc" 2> "$work/enc.err" \
+        || { hit_note file "could not check encodings: $(first_err "$work/enc.err")"; return 0; }
+    mkdir -p "$work/wide.d"
+    while IFS= read -r -d '' f && IFS= read -r enc; do
+        enc=${enc##* }; i=$((i + 1)); d="$work/wide.d/$i"
+        case $enc in
+            utf-16*|utf-32*)
+                if iconv -f "$(printf '%s' "${enc%%[lb]e}" | tr 'a-z' 'A-Z')" -t UTF-8 < "$f" > "$d" 2> /dev/null; then scan_wide "$f" "$d"
+                else hit_note "$f" "could not scan: $enc text that does not decode"; fi ;;
+            *) notread=$((notread + 1)); scan_wide "$f" "$f" ;;
+        esac
+    done < "$work/enc"
+}
+
+scan_paths() {   # scan_paths <all> <path...>
+    local all=$1 f files=0 rest n t rc line; shift
+    : > "$work/list.err"; : > "$work/readable"
+    list_files "$all" "$@" > "$work/list"
+    while IFS= read -r line; do   # whatever could not be listed is a hit, never a gap
+        [ -n "$line" ] && hit_note "$(unread_path "$line")" "could not scan"
+    done < "$work/list.err"
+    while IFS= read -r -d '' f; do
+        if [ -L "$f" ] && [[ $explicit != *$'\n'"$f"$'\n'* ]]; then continue; fi   # git commits a symlink as its path
+        if [ -d "$f" ]; then nested=$((nested + 1)); continue; fi   # a nested repository or submodule: git lists it as a folder
+        [ -f "$f" ] || continue          # tracked but deleted in the work tree
+        files=$((files + 1))
+        case $f in *$'\037'*|*$'\n'*)   # a name that would break the records: a note (named exactly in --json), never a record
+            hit_note "$f" "file name holds a control character — not scanned"; continue ;;
+        esac
+        secret_named "$f" && hit_note "$f" "secret-named file"
+        if [ -r "$f" ]; then printf '%s\0' "$f" >> "$work/readable"; else hit_note "$f" "could not scan"; fi
+    done < "$work/list"
+    if [ -s "$work/readable" ]; then
+        # xargs reports 123 for "no match" and for an error alike: grep's own messages decide
+        xargs -0 $GREP -H -I -n --null -E "${KEYSCAN_PATTERNS[@]}" -- < "$work/readable" > "$work/out" 2> "$work/grep.err"
+        while IFS= read -r -d '' f && IFS= read -r rest; do
+            n=${rest%%:*}; t=${rest#*:}
+            if allowed "$t"; then skip_line "-" "$f" "$n"; continue; fi
+            hit_line "-" "$f" "$n" "$t"
+        done < "$work/out"
+        while IFS= read -r line; do   # "grep: <file>: <reason>"
+            [ -n "$line" ] || continue
+            line=${line#*grep: }
+            hit_note "${line%%: *}" "could not scan: ${line#*: }"
+        done < "$work/grep.err"
+        scan_encodings
+    fi
+    scanned="$files file$([ "$files" = 1 ] || echo s) scanned"
+}
+
+# --- gitleaks: its hits go to $work/eng as "<commit or ->\037<file>\037<line>\037<rule>" ---
+# Named as keyscan names files: under a folder, the folder's own spelling in
+# front of the name relative to it (<base> is how the engine spelled the
+# folder); a file scanned on its own, its name as given. A result line that is
+# not four fields with a number for the line (a file name holding a control
+# character) is a hit, never dropped and never trusted.
+add_hits() {   # add_hits <engine> <dir|file|repo|stdin> <path> <base> < "<commit>\037<file>\037<line>\037<rule>" lines
+    local bad
+    HOW=$2 P=$3 BASE=$4 BAD="$work/bad" COUNTED=${COUNTED:-0} awk -F '\037' '
+        BEGIN { OFS = "\037"; how = ENVIRON["HOW"]; p = ENVIRON["P"]; base = ENVIRON["BASE"]; counted = ENVIRON["COUNTED"] == 1 }
+        counted && NR == 1 { if ($0 !~ /^[0-9]+$/) bad++; want = $0 + 0; next }   # gitleaks first says how many it found
+        NF != 4 || $3 !~ /^[0-9]+$/ { if (NF) bad++; next }
+        {
+            f = $2
+            if (base != "" && index(f, base "/") == 1) f = substr(f, length(base) + 2)
+            if (how == "dir") { f = p "/" f; sub(/^\.\//, "", f) }
+            else if (how == "file") { f = p; sub(/^\.\//, "", f) }
+            else if (how == "stdin") f = "(stdin)"
+            print ($1 == "" ? "-" : $1), f, $3, $4; got++
+        }
+        END { if (counted && NR < 1) bad = 1   # an empty report is never read as clean
+              if (counted && got != want && bad == 0) bad = 1   # a name that forged whole lines
+              print bad + 0 > ENVIRON["BAD"] }' >> "$work/eng"
+    bad=$(cat "$work/bad")
+    [ "$bad" -gt 0 ] && hit_note "$1" "$bad result line$([ "$bad" = 1 ] || echo s) it could not read (a file name holding a control character?)"
+    return 0
+}
+abs_dir() { (CDPATH='' cd -- "$1" 2>/dev/null && pwd -P); }   # physical: the engines do not walk into a symlinked root
+abs_path() {   # abs_path <path>: a folder or a file, absolute and physical
+    local d
+    if [ -d "$1" ]; then abs_dir "$1"; else d=$(abs_dir "$(dirname -- "$1")") && printf '%s/%s' "$d" "$(basename -- "$1")"; fi
+}
+# gitleaks' explicit config: its default rules, so no .gitleaks.toml in a scanned
+# folder narrows a scan. GITLEAKS_CONFIG / GITLEAKS_CONFIG_TOML, when set, are
+# the user's own and apply instead.
+gitleaks_cfg() {
+    gl_cfg=()
+    if [ -z "${GITLEAKS_CONFIG:-}${GITLEAKS_CONFIG_TOML:-}" ]; then
+        [ -f "$work/gl.toml" ] || printf '[extend]\nuseDefault = true\n' > "$work/gl.toml"
+        gl_cfg=(--config "$work/gl.toml")
+    fi
+    [ "$strict" = 1 ] && gl_cfg+=(--ignore-gitleaks-allow)
+    return 0
+}
+# An engine that is installed but fails is a hit, never a pass. gitleaks runs
+# from keyscan's empty temp folder on an absolute path, so no .gitleaksignore
+# inside the scanned folder applies on its own: keyscan applies one
+# .gitleaksignore the same way to every rule (merge_hits).
+gitleaks_hits() {   # gitleaks_hits <how> <path> <base> <gitleaks args...>
+    [ "$engines" = 1 ] && [ -n "$GITLEAKS" ] || return 0
+    local how=$1 p=$2 base=$3 rc; shift 3
+    engine_ran=1
+    [ -f "$work/gl.tmpl" ] || printf '%s' "$GL_TMPL" > "$work/gl.tmpl"
+    gitleaks_cfg
+    (CDPATH='' cd -- "$work/noignore" && "$GITLEAKS" "$@" "${gl_cfg[@]+"${gl_cfg[@]}"}" --redact --no-banner --no-color \
+        --log-level error --exit-code 3 --gitleaks-ignore-path "$work/noignore" --report-format template \
+        --report-template "$work/gl.tmpl" --report-path -) > "$work/gl.out" 2> "$work/gl.err"; rc=$?
+    if [ "$rc" != 0 ] && [ "$rc" != 3 ]; then hit_note gitleaks "could not run: $(first_err "$work/gl.err")"; return; fi
+    # at --log-level error anything on stderr is an error (a git log gitleaks could not run, say)
+    if [ -s "$work/gl.err" ]; then hit_note gitleaks "could not run: $(first_err "$work/gl.err")"; return; fi
+    COUNTED=1 add_hits gitleaks "$how" "$p" "$base" < "$work/gl.out"
+}
+# History hits from gitleaks carry the full commit; keyscan's own the short one.
+shorten_commits() {
+    local full short
+    [ -s "$work/eng" ] || return 0
+    awk -F '\037' '$1 != "-" { print $1 }' "$work/eng" | sort -u > "$work/full"
+    [ -s "$work/full" ] || return 0
+    : > "$work/short"
+    while IFS= read -r full; do
+        short=$(git rev-parse --short "$full" 2>/dev/null) || short=$full
+        printf '%s\037%s\n' "$full" "$short" >> "$work/short"
+    done < "$work/full"
+    awk -F '\037' 'BEGIN { OFS = "\037" } FNR == NR { s[$1] = $2; next } { if ($1 in s) $1 = s[$1]; print }' \
+        "$work/short" "$work/eng" > "$work/eng.s" && mv "$work/eng.s" "$work/eng"
+}
+# An engine hit on a line marked allow is skipped too: its text comes from the
+# records (staged, history), the file (paths) or the input (stdin). In paths
+# mode a hit counts only in a file keyscan itself scanned.
+engine_text() {   # engine_text <mode>: $work/eng as "...\037<text>" lines on stdout
+    local c f n r t
+    case $1 in
+        staged|history)
+            awk 'FNR == NR { k = $1 SUBSEP $2 SUBSEP $3; want[k] = 1; next }
+                 { k = $1 SUBSEP $2 SUBSEP $3
+                   if ((k in want) && !(k in text)) { t = $0; sub(/^[^\t]*\t[^\t]*\t[^\t]*\t/, "", t); text[k] = t } }
+                 END { while ((getline line < ENGFILE) > 0) {
+                         split(line, a, "\037"); k = a[1] SUBSEP a[2] SUBSEP a[3]
+                         print line "\037" ((k in text) ? text[k] : "") } }' \
+                FS=$'\037' "$work/eng" FS=$'\t' ENGFILE="$work/eng" "$work/records" ;;
+        stdin)
+            while IFS=$'\037' read -r c f n r; do
+                printf '%s\037%s\037%s\037%s\037%s\n' "$c" "$f" "$n" "$r" "$(sed -n "${n}p" "$work/input")"
+            done < "$work/eng" ;;
+        paths)
+            tr '\0' '\n' < "$work/readable" > "$work/readable.nl"
+            while IFS=$'\037' read -r c f n r; do
+                $GREP -q -x -F -- "$f" "$work/readable.nl" || continue
+                case $f in /*) t=$f ;; *) t=./$f ;; esac
+                printf '%s\037%s\037%s\037%s\037%s\n' "$c" "$f" "$n" "$r" "$(sed -n "${n}p" "$t" 2>/dev/null)"
+            done < "$work/eng" ;;
+    esac
+}
+
+# Every hit, merged: engine hits joined to keyscan's own, places listed in
+# .gitleaksignore dropped (not under --strict), one line per place with every
+# rule that matched.
+merge_hits() {   # merge_hits <mode> <.gitleaksignore folder> <its path prefix>
+    local mode=$1 c f n p r t
+    shorten_commits
+    if [ -s "$work/eng" ]; then
+        engine_text "$mode" > "$work/engt"
+        while IFS=$'\037' read -r c f n r t; do
+            if allowed "$t"; then skip_line "$c" "$f" "$n"; continue; fi
+            printf '%s\037%s\037%s\037-\037%s\n' "$c" "$f" "$n" "$r" >> "$work/found"
+        done < "$work/engt"
+    fi
+    : > "$work/ignore"
+    [ "$mode" != stdin ] && [ "$strict" = 0 ] && [ -f "$2/.gitleaksignore" ] && /bin/cp "$2/.gitleaksignore" "$work/ignore"
+    # .gitleaksignore: [commit:]file:rule:line, the rule ignored; a commit matches its short form
+    MODE=$mode PRE=$3 CNT="$work/ignored" IGNF="$work/ignore" awk '
+        BEGIN { FS = OFS = "\037"; mode = ENVIRON["MODE"]; pre = ENVIRON["PRE"]; cnt = ENVIRON["CNT"]; ignf = ENVIRON["IGNF"] }
+        FILENAME == ignf {
+            sub(/\r$/, ""); if ($0 ~ /^[ \t]*(#|$)/) next
+            e = $0; n = e; sub(/.*:/, "", n); e = substr(e, 1, length(e) - length(n) - 1); sub(/:[^:]*$/, "", e)
+            c = ""
+            if (mode == "history") { c = e; sub(/:.*/, "", c)
+                if (c ~ /^[0-9a-f]+$/ && length(c) >= 7 && length(c) <= 40) e = substr(e, length(c) + 2); else c = "" }
+            if (c == "") bare[e SUBSEP n] = 1; else at[e SUBSEP n] = at[e SUBSEP n] " " c
+            next
+        }
+        {
+            k = pre $2 SUBSEP $3; hit = 0
+            if ((k in bare) && ($1 == "-" || mode == "history")) hit = 1   # in history, as gitleaks: every commit
+            else if ($1 != "-" && (k in at)) {
+                m = split(at[k], cs, " ")
+                for (i = 1; i <= m; i++) if (index(cs[i], $1) == 1 || index($1, cs[i]) == 1) hit = 1
+            }
+            if (hit) { if (!(($1 FS k) in gone)) { gone[$1 FS k] = 1; dropped++ }; next }   # counted per place
+            print
+        }
+        END { print dropped + 0 > cnt }' "$work/ignore" "$work/found" > "$work/kept"
+    ignored=$(cat "$work/ignored")
+    awk 'BEGIN { FS = OFS = "\037" }
+        { k = $1 FS $2 FS $3
+          if (!(k in pv)) { order[++m] = k; pv[k] = "-"; lb[k] = "" }
+          if (pv[k] == "-" && $4 != "-") pv[k] = $4
+          if (index(" " set[k] " ", " " $5 " ") == 0) { set[k] = set[k] " " $5; lb[k] = (lb[k] == "" ? $5 : lb[k] ", " $5) } }
+        END { for (i = 1; i <= m; i++) print order[i], pv[order[i]], lb[order[i]] }' "$work/kept" > "$work/merged"
+    while IFS=$'\037' read -r c f n p r; do
+        [ "$c" = "-" ] && c=""
+        [ "$p" = "-" ] && p=""
+        if [ "$json" = 1 ]; then
+            jn=$n; [[ $jn =~ ^[0-9]+$ ]] || jn=null
+            printf '{"place":%s,"commit":%s,"file":%s,"line":%s,"preview":%s,"rules":[%s]}\n' \
+                "$(jstr "${c:+$c }$f:$n")" "$([ -n "$c" ] && jstr "$c" || echo null)" "$(jstr "$f")" "$jn" \
+                "$(jstr "$p")" "$(printf '%s' "$r" | awk -F ', ' '{ for (i = 1; i <= NF; i++) { g = $i
+                    gsub(/\\/, "\\\\", g); gsub(/"/, "\\\"", g); gsub(/[\001-\037]/, "?", g); printf "%s\"%s\"", (i > 1 ? "," : ""), g } }')"
+        elif [ -z "$p" ]; then printf '%s  [%s]\n' "$(vis "${c:+$c }$f:$n")" "$r"
+        else printf '%s  %s…  [%s]\n' "$(vis "${c:+$c }$f:$n")" "$(vis "$p")" "$r"; fi
+        hits=$((hits + 1)); seen "${c:+$c }$f"
+    done < "$work/merged"
+}
+
+# --mask: FILE as text with every secret replaced, for a reader that must not
+# see one. Every line gitleaks flags is replaced whole (columns are not trusted
+# across encodings), every private-key block line by line, then every match of
+# keyscan's own patterns. No allow marker and no .gitleaksignore applies. It
+# fails closed: gitleaks installed but not runnable, or output it cannot read,
+# prints nothing and exits 1.
+mask_fail() { printf '✗ could not mask: %s\n' "$1" >&2; exit 1; }
+mask_file() {   # mask_file <file>
+    local f=$1 rc t="$work/m/target.txt"
+    [ -f "$f" ] && [ -r "$f" ] || mask_fail "cannot read $(vis "$f")"
+    # a NUL (binary or UTF-16 text) would cut awk's lines short: never masked, never passed through
+    tr -d '\000' < "$f" | cmp -s - "$f" || mask_fail "$(vis "$f") is binary or UTF-16 — not masked"
+    # a plain copy under a neutral name: gitleaks then skips nothing it would skip on
+    # its own (a symlink, a lockfile, node_modules/, an image extension), and no
+    # odd name reaches awk or sed
+    mkdir -p "$work/m/b" && /bin/cp -L -- "$f" "$t" || mask_fail "cannot copy $f"
+    # a second copy keeps FILE's own name, for the rules gitleaks applies by name only
+    # (.tf, .yaml, .php, nuget.config, pkcs12); only gitleaks reads that one
+    /bin/cp -L -- "$f" "$work/m/b/$(basename -- "$f")" || mask_fail "cannot copy $f"
+    : > "$work/spans"
+    if [ "$engines" = 1 ] && [ -n "$GITLEAKS" ]; then
+        printf '%s' "$GL_SPAN_TMPL" > "$work/span.tmpl"
+        strict=1; gitleaks_cfg
+        for copy in "$t" "$work/m/b/$(basename -- "$f")"; do
+            (CDPATH='' cd -- "$work/noignore" && "$GITLEAKS" dir "$copy" "${gl_cfg[@]+"${gl_cfg[@]}"}" --redact --no-banner \
+                --no-color --log-level error --exit-code 3 --gitleaks-ignore-path "$work/noignore" --report-format template \
+                --report-template "$work/span.tmpl" --report-path -) > "$work/spans.raw" 2> "$work/gl.err"; rc=$?
+            [ "$rc" = 0 ] || [ "$rc" = 3 ] || mask_fail "gitleaks could not run: $(first_err "$work/gl.err")"
+            [ -s "$work/gl.err" ] && mask_fail "gitleaks reported an error: $(first_err "$work/gl.err")"
+            # trusted only when the count line is a number and every span matches it, start ≤ end
+            awk -F '\037' 'NR == 1 { if ($0 !~ /^[0-9]+$/) bad++; want = $0 + 0; next }
+                NF == 5 && $1 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && $3 + 0 >= $1 + 0 { print $1 "\037" $3 "\037" $5; got++; next }
+                { bad++ }
+                END { exit (NR < 1 || bad || got != want) ? 1 : 0 }' "$work/spans.raw" >> "$work/spans" \
+                || mask_fail "gitleaks output it could not read"
+        done
+    elif [ "$engines" = 1 ]; then   # a partial mask must never pass as a full one
+        mask_fail "gitleaks is not installed — install it, or pass --no-engines to mask with keyscan's own patterns only"
+    else
+        printf '⚠ masked with keyscan'\''s own patterns only (no gitleaks)\n' >&2
+    fi
+    awk -F '\037' 'FILENAME == ARGV[1] { for (l = $1; l <= $2; l++) gl[l] = $3; next }
+        /-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----/ { inkey = 1 }
+        FNR in gl { print "‹redacted:" gl[FNR] "›"; if (inkey && /-----END [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----/) inkey = 0; next }
+        inkey { print "‹redacted:private-key›"; if (/-----END [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----/) inkey = 0; next }
+        { print }' "$work/spans" "$t" > "$work/masked" || mask_fail "awk failed"
+    # a line any own pattern matches is replaced whole, so no tail of a partly matched key stays
+    $GREP -a -n -E "${KEYSCAN_PATTERNS[@]}" "$work/masked" > "$work/ownhits" 2> "$work/grep.err"; rc=$?
+    [ "$rc" -le 1 ] || mask_fail "grep failed: $(head -1 "$work/grep.err")"
+    cut -d: -f1 "$work/ownhits" > "$work/ownlines" || mask_fail "cut failed"
+    awk 'FILENAME == ARGV[1] { own[$1] = 1; next } FNR in own { print "‹redacted:keyscan›"; next } { print }' \
+        "$work/ownlines" "$work/masked" > "$work/masked.o" || mask_fail "awk failed"
+    cat "$work/masked.o"
+    exit 0
+}
+
+to_top() {   # staged and history modes read the repo from its top
+    local top
+    top=$(git rev-parse --show-toplevel 2>/dev/null) || cannot "not inside a git repository"
+    cd "$top" || cannot "cannot enter $top"
+}
+help() { awk 'NR==1 { next } /^# \(c\)/ { next } /^# author:/ { next } /^#/ { sub(/^# ?/,""); print; next } { exit }' "$0"; exit 0; }
+
+mode=paths all=0 paths=() range="" ranged=0 maskf="" modes=0 REVS=(--all)
+[ $# -eq 1 ] && [ "$1" = help ] && help
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h|--help) help ;;
+        -a|--all) all=1 ;;
+        -s|--staged) mode=staged; modes=$((modes + 1)) ;;
+        -H|--history) mode=history; modes=$((modes + 1)) ;;
+        --range) [ $# -ge 2 ] || cannot "--range needs BASE..HEAD"; range=$2; ranged=1; shift ;;
+        --mask) [ $# -ge 2 ] || cannot "--mask needs a file"; mode=mask; maskf=$2; modes=$((modes + 1)); shift ;;
+        --strict) strict=1 ;;
+        --json) json=1 ;;
+        --no-engines) engines=0 ;;
+        -) mode=stdin; modes=$((modes + 1)) ;;
+        --) shift; paths+=("$@"); break ;;
+        -*) cannot "unknown option $1 (keyscan -h)" ;;
+        *) paths+=("$1") ;;
+    esac
+    shift
+done
+[ "$modes" -le 1 ] || cannot "one mode at a time: keyscan [path...] | -s | -H | - | --mask FILE"
+if [ "$mode" = mask ]; then
+    [ ${#paths[@]} -eq 0 ] && [ "$ranged" = 0 ] && [ "$json" = 0 ] && [ "$all" = 0 ] && [ "$strict" = 0 ] \
+        || cannot "--mask takes one file and no other option but --no-engines"
+    mask_file "$maskf"
+fi
+case "$mode" in paths) ;; *)
+    [ ${#paths[@]} -eq 0 ] || cannot "paths cannot be given with a mode: keyscan [path...] | -s | -H | -" ;;
+esac
+# --strict is for paths and standard input: in -s and -H gitleaks reads the repo's .gitleaksignore itself
+case "$mode" in staged|history) [ "$strict" = 0 ] || cannot "--strict works with paths and - only" ;; esac
+[ "$ranged" = 0 ] || [ "$mode" = history ] || cannot "--range goes with -H (keyscan -H --range BASE..HEAD)"
+if [ ${#paths[@]} -gt 0 ]; then   # dir/ is dir: keyscan and gitleaks must spell a folder alike
+    for i in "${!paths[@]}"; do
+        q=${paths[$i]}; while [ "${#q}" -gt 1 ] && [ "${q%/}" != "$q" ]; do q=${q%/}; done; paths[$i]=$q
+    done
+fi
+
+case "$mode" in
+    paths)
+        [ ${#paths[@]} -gt 0 ] || paths=(.)
+        scan_paths "$all" "${paths[@]}"
+        for p in "${paths[@]}"; do
+            # gitleaks may read a .gitleaksignore at a scanned folder's top whatever keyscan says
+            # (entries holding the absolute path): --strict cannot promise to honour none, so it is a hit
+            [ "$strict" = 1 ] && [ -d "$p" ] && [ -e "$p/.gitleaksignore" ] \
+                && hit_note "${p%/}/.gitleaksignore" "--strict: gitleaks may honour this file — remove or rename it to scan strictly"
+            if [ -L "$p" ] && [ -f "$p" ] && [ -r "$p" ] && [ "$engines" = 1 ] && [ -n "$GITLEAKS" ]; then   # gitleaks skips a symlink: read a plain copy
+                lc="$work/lnk/${#p}-$RANDOM"
+                if mkdir -p "$lc" && /bin/cp -L -- "$p" "$lc/$(basename -- "$p")"; then gitleaks_hits file "$p" "" dir "$lc/$(basename -- "$p")"
+                else hit_note "$p" "could not scan: no copy for gitleaks"; fi
+            elif a=$(abs_path "$p"); then   # unreadable: keyscan's own listing has reported it
+                if [ -d "$p" ]; then gitleaks_hits dir "$p" "$a" dir "$a"; else gitleaks_hits file "$p" "" dir "$a"; fi
+            fi
+        done
+        ign_dir=$(git rev-parse --show-toplevel 2>/dev/null) || ign_dir=$PWD
+        merge_hits paths "$ign_dir" "$(git rev-parse --show-prefix 2>/dev/null)" ;;
+    staged)
+        to_top
+        git_to "$work/names" diff --cached --name-only -z --diff-filter=d --no-relative
+        files=0
+        while IFS= read -r -d '' f; do
+            files=$((files + 1))
+            secret_named "$f" && hit_note "$f" "secret-named file"
+        done < "$work/names"
+        git_to "$work/diff" diff --cached "${DIFF_OPTS[@]}"
+        tr '\0' ' ' < "$work/diff" | added_lines > "$work/records"   # awk ends a line at a NUL
+        scan_records
+        git_to "$work/numstat" diff --cached --numstat -z --no-renames --diff-filter=d --no-relative
+        staged_wide
+        gitleaks_hits repo . "$PWD" git --pre-commit --staged "$PWD"
+        merge_hits staged "$PWD" ""
+        scanned="$files staged file$([ "$files" = 1 ] || echo s) scanned" ;;
+    history)
+        to_top
+        if [ "$ranged" = 1 ]; then   # resolved to two commits, so git and gitleaks read the same range
+            case $range in *[[:space:]]*|*...*|-*|..*|*..) cannot "--range needs BASE..HEAD: $range" ;; *..*) ;; *) cannot "--range needs BASE..HEAD: $range" ;; esac
+            rb=$(git rev-parse --verify --quiet --end-of-options "${range%%..*}^{commit}") || cannot "--range: no such commit ${range%%..*}"
+            re=$(git rev-parse --verify --quiet --end-of-options "${range#*..}^{commit}") || cannot "--range: no such commit ${range#*..}"
+            range="$rb..$re"; REVS=("$range")
+        fi
+        stashes=""
+        if [ "$ranged" = 0 ]; then   # --all reaches only the newest stash; older ones live in the stash reflog
+            stashes=$(git stash list --format=%H 2>/dev/null | tr '\n' ' ')
+            for s in $stashes; do REVS+=("$s"); done
+        fi
+        commits=$(git rev-list "${REVS[@]}" --count 2>/dev/null) || cannot "git could not read the history${range:+ for $range}"
+        history_names
+        c=""
+        while IFS= read -r line; do
+            if [ "${line:0:1}" = $'\001' ]; then c=${line:1}; continue; fi
+            [ -n "$line" ] || continue
+            if [[ $line == \"*\" ]]; then line=${line:1:${#line}-2}; line=${line//\\\"/\"}; fi   # git quotes odd names
+            secret_named "$line" && hit_note "$c $line" "secret-named file, committed"
+        done < "$work/names"
+        history_records
+        scan_records
+        if [ -n "$range" ]; then gitleaks_hits repo . "$PWD" git --log-opts "$range" "$PWD"
+        else
+            gitleaks_hits repo . "$PWD" git "$PWD"
+            # a stash is a merge commit, which git log -p shows no diff for: each one read against its first parent
+            if [ -n "${stashes// /}" ]; then
+                gitleaks_hits repo . "$PWD" git --log-opts "--diff-merges=first-parent --no-walk ${stashes% }" "$PWD"
+            fi
+        fi
+        merge_hits history "$PWD" ""
+        scanned="$commits commit$([ "$commits" = 1 ] || echo s) scanned" ;;
+    stdin)
+        cat > "$work/input"
+        lines=$(awk 'END { print NR }' "$work/input")
+        $GREP -a -n -E "${KEYSCAN_PATTERNS[@]}" -- "$work/input" > "$work/out" 2> "$work/grep.err"; rc=$?
+        grep_ran "$rc"
+        while IFS= read -r rest; do
+            n=${rest%%:*}; t=${rest#*:}
+            if allowed "$t"; then skip_line "-" "(stdin)" "$n"; continue; fi
+            hit_line "-" "(stdin)" "$n" "$t"
+        done < "$work/out"
+        gitleaks_hits stdin - "" stdin < "$work/input"
+        merge_hits stdin "" ""
+        scanned="$lines line$([ "$lines" = 1 ] || echo s) scanned" ;;
+esac
+
+note=""
+[ "$skipped" -gt 0 ] && note+=" · $skipped line$([ "$skipped" = 1 ] || echo s) marked allow skipped"
+[ "$examples" -gt 0 ] && note+=" · $examples documented example key$([ "$examples" = 1 ] || echo s) skipped"
+[ "$ignored" -gt 0 ] && note+=" · $ignored place$([ "$ignored" = 1 ] || echo s) in .gitleaksignore skipped"
+[ "$notread" -gt 0 ] && note+=" · $notread binary file$([ "$notread" = 1 ] || echo s) not read"
+[ "$nested" -gt 0 ] && note+=" · $nested nested repositor$([ "$nested" = 1 ] && echo y || echo ies) not scanned — scan each on its own"
+[ "$engine_ran" = 1 ] || note+=" · keyscan's own patterns only"
+rc=0; [ "$hits" -gt 0 ] && rc=1
+end_status() { if [ "$json" = 1 ]; then status "$@" >&2; else status "$@"; fi; }   # --json: stdout stays JSON
+[ "$json" = 1 ] && printf '{"summary":{"hits":%s,"places":%s,"scanned":%s,"skipped":%s,"not_read":%s,"nested":%s,"exit":%s}}\n' \
+    "$hits" "${#places[@]}" "$(jstr "$scanned")" "$skipped" "$notread" "$nested" "$rc"
+if [ "$rc" = 1 ]; then
+    end_status fail "$hits hit$([ "$hits" = 1 ] || echo s) in ${#places[@]} place$([ ${#places[@]} = 1 ] || echo s) — $scanned$note"
+    exit 1
+fi
+end_status ok "no secrets found — $scanned$note"

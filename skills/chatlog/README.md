@@ -12,7 +12,7 @@ curl -fsSL https://quixtop.com/i | sh -s -- chatlog
 
 Invoke it as `/chatlog` in Claude Code.
 
-Log significant chat interactions from a dev session into the project chatlog (docs/logs/chatlog.md) — project-scoped, newest-first, secret-redacting. Also invoked FIRST by the pushlog push workflow (must complete before pushlog.sh runs).
+Log significant chat interactions of a dev session into the project chatlog (docs/logs/chatlog.md) — project-scoped, newest-first, secrets redacted.
 
 ## Source
 

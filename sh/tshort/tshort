@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # (c) Shrix
 # author: shrix
-"""tshort — print the first t.co short link embedded in a tweet/X post.
+"""tshort — print the t.co short link of a tweet/X post.
 
 Asks for a tweet URL, then reads the post's entities back from Twitter's
-public syndication endpoint (no login/API key) and prints the first t.co
-URL as it appears in the tweet text. A pure-text tweet has no t.co.
+public syndication endpoint (no login/API key) and prints its media t.co
+(the photo/video link, which points at the post) or, with no media, the
+first link t.co in the tweet text. A pure-text tweet has no t.co.
 """
 
 import atexit as _atexit, sys as _sys
@@ -24,10 +25,11 @@ UA = (
     "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 )
 
-HELP = """tshort — print the first t.co short link embedded in a tweet/X post.
+HELP = """tshort — print the t.co short link of a tweet/X post.
 
 usage:
-  tshort                 prompt for a tweet/X URL, then print its first t.co
+  tshort                 prompt for a tweet/X URL, then print its t.co
+                         (the media one when it has a photo/video, else the first link)
   tshort -h, --help      show this help
 
 A pure-text tweet (no links or media) has no t.co.
@@ -47,15 +49,21 @@ def fetch(tweet_id):
 
 
 def first_tco(data):
-    """First t.co in tweet order, scanning both link and media entities."""
+    """The tweet's MEDIA t.co when it has media, else its first link t.co in tweet order.
+
+    Media first by entity list, never by position (28Oct26): every photo/video shares one t.co and it
+    points back at the tweet; a link typed above a video used to win. Mirrors tiny's firstTco.
+    """
     ents = data.get("entities") or {}
+    for e in ents.get("media") or []:
+        if e.get("url"):
+            return e["url"]
     found = []
-    for key in ("urls", "media"):
-        for e in ents.get(key) or []:
-            url = e.get("url")
-            if url:
-                pos = (e.get("indices") or [10**9])[0]
-                found.append((pos, url))
+    for e in ents.get("urls") or []:
+        url = e.get("url")
+        if url:
+            pos = (e.get("indices") or [10**9])[0]
+            found.append((pos, url))
     found.sort()
     return found[0][1] if found else None
 

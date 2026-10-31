@@ -29,7 +29,7 @@ case, M=2 — so (C) and (D) are exactly the r2 critiques.
   is choosing between refined positions.
 - If (E) and (F) are absent (`--no-revise` mode or revision failed) → judge
   between the original first-draft (A)/(B) using (C)/(D) as the critique
-  context. Legacy behaviour.
+  context.
 
 Produce ONE final settled answer to the original request. Apply these rules:
 

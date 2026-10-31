@@ -7,7 +7,7 @@ pipx items, sorted several ways, as both Markdown and a browsable HTML page.
 Usage: instls [-h|--help|help] [-l|--list|list] [-o|--open|open]
               [-a|--all|all]
 
-  (no args)   rebuild ~/bin/installeds.md and ~/bin/installeds.html
+  (no args)   rebuild installeds.md and installeds.html in ~/Applications/installed-apps/
   -a          include libraries and dependencies too (see below)
   -l          show what the files hold, then offer to open them
   -o          open the HTML page in the browser straight away
@@ -43,8 +43,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 MIN_VALID = datetime(1990, 1, 1).timestamp()
-OUT_MD = os.path.expanduser("~/bin/installeds.md")
-OUT_HTML = os.path.expanduser("~/bin/installeds.html")
+OUT_MD = os.path.expanduser("~/Applications/installed-apps/installeds.md")
+OUT_HTML = os.path.expanduser("~/Applications/installed-apps/installeds.html")
 HOME = os.path.expanduser("~")
 RUN_ERRORS = []
 SHOW_ALL = False        # -a: include libraries/dependencies in the main lists

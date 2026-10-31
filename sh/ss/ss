@@ -1,0 +1,521 @@
+#!/usr/bin/env bash
+# (c) Shrix
+# author: shrix
+# ss — rename macOS screen captures to bare numbers (1.png), no date, no prefix.
+#
+# macOS names captures "Screenshot 2026-08-20 at 8.25.39 PM.png" and cannot be
+# made to produce "1.png" natively: setting com.apple.screencapture
+# name+include-date gets you "ss 1.png", and the collision separator is always
+# a SPACE with no key to change it. So rename after the fact.
+#
+#   ss                    rename captures in the screenshot folder
+#   ss -n | --dry-run | dry-run
+#                         show what would change, rename nothing
+#   ss -l | --list | list [n]
+#                         list the screenshot folder, newest first
+#                         (default 10 rows; `n` or `all` for more)
+#   ss -x | --delete | del [n...]
+#                         move screenshots to the trash (recoverable).
+#                         Bare form takes the newest numbered one; otherwise
+#                         name them: `ss del 5 7 9` or `ss del 5, 7, 9`
+#   ss -r | --reorder | reo | reorder
+#                         compact existing numbers into 1..N by capture time
+#   ss -m | --max | max <num>
+#                         ceiling for THIS run (default below)
+#   ss -d | --dir | dir <dir>
+#                         source folder (default ~/Downloads/Down)
+#   SS_DEST=<dir>         destination (default <source>/Screenshots)
+#   ss -h | --help | help this help
+#
+# Every option takes all three forms — short, long, and bare word. reorder
+# additionally accepts `reo`. Bare words are safe here because ss has no
+# free-form positionals for one to collide with.
+#
+# ── The number ceiling ──────────────────────────────────────────────────────
+# Numbers live in 1..MAX (default 99, so filenames stay two digits). Once past
+# PRESSURE_PCT, free slots are handed out LOWEST FIRST, so deleting 50.png puts
+# 50 back in the pool and a later capture reclaims it.
+#
+# That deliberately trades away chronological numbering: after 99 the next may
+# be 50, then 73. The capture ORDER is still recoverable — renaming
+# never touches mtime, so sorting by date always works. Only the number stops
+# tracking time, which is the price of a bounded range.
+#
+# Within one run, files are still processed oldest-first, so a batch gets
+# ascending slots from whatever the pool offers.
+#
+# ── Where files live ────────────────────────────────────────────────────────
+# macOS drops captures in DIR; ss renames AND moves them into DIR/Screenshots
+# so the download folder stays uncluttered. The slot scan reads the destination,
+# since that is where the numbering state actually lives.
+#
+# ── Fullness indicator ──────────────────────────────────────────────────────
+# Below TAG_PCT the status line stands alone. At or above it a second, indented
+# line reports the REMAINING slots — "2 left for max" — coloured by the GYR ramp
+# from REFS/palettes.html. Its own line, so the status line above keeps its
+# plain outcome colour and the two readings never compete.
+# At the default 99/75 that means the line shows for counts of 25 and lower.
+# Bands are quadratic, so red means genuinely last-slot rather than merely low.
+# TAG_PCT sits BELOW PRESSURE_PCT on purpose: the colour warns you well before
+# numbering actually starts jumping backwards into recycled slots.
+#
+# Renames only files still carrying macOS's own capture names. Anything you
+# named yourself is never touched. No watcher, no agent, no state file — the
+# folder itself is the state.
+
+set -uo pipefail
+
+# Trailing gap — one blank line after this script's output, TTY only, so piped
+# or redirected output stays exactly the data. Fires on every exit path.
+_gap() { [ -t 1 ] && printf '\n'; return 0; }
+trap _gap EXIT
+
+# Colours + the `status` closing line (TTY-guarded).
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/proj-env.sh" 2>/dev/null || true
+type status >/dev/null 2>&1 || status() { printf '%s %s\n' "$1" "$2"; }
+
+# ── Configure here ──────────────────────────────────────────────────────────
+MAX=99             # highest slot number; -m overrides for a single run.
+                   # 99 not 100, so every filename stays at most two digits —
+                   # the 100th live screenshot recycles a freed slot instead of
+                   # widening to three.
+                   # Files numbered ABOVE this are invisible to the slot scan —
+                   # they are neither counted nor recycled. Lowering MAX means
+                   # renumbering anything above it first, or those files fall
+                   # out of management silently.
+PRESSURE_PCT=90    # BEHAVIOUR threshold: below it numbering runs straight up;
+                   # at or above it, freed slots start getting recycled and
+                   # numbers stop tracking capture order.
+TAG_PCT=75         # DISPLAY threshold: the coloured [N] count appears from here.
+                   # Deliberately lower than PRESSURE_PCT so the tag is an early
+                   # warning — it turns up while numbering is still sequential
+                   # and gives you a whole quarter of the range to delete in
+                   # before behaviour actually changes.
+# ────────────────────────────────────────────────────────────────────────────
+
+# Empty by default: files are bare numbers (226.png). SS_PREFIX="ss" restores
+# the old ss-226.png form. The separator is glued on ONLY when a prefix exists —
+# "$PREFIX-$n" with an empty prefix yields "-226.png", and a leading hyphen makes
+# every later command read the filename as a flag.
+PREFIX="${SS_PREFIX-}"
+STEM="${PREFIX:+$PREFIX-}"        # "ss-" or "" — never a bare "-"
+DIR="${SS_DIR:-$HOME/Downloads/Down}"
+DRY=0
+RENUM=0
+LIST=0
+DEL=0
+LIMIT=10           # rows -l prints; 0 (or `all`) means every file
+TARGETS=()         # bare positionals; -x names its victims here
+
+# GYR ramp, green → red (REFS/palettes.html § GYR color transition). Index 0 is
+# the roomy end of the display zone, index 9 the last slot.
+GYR=(0,230,118 50,227,90 118,216,62 168,208,42 212,197,32 \
+     240,180,24 245,147,18 240,105,16 232,64,14 224,22,22)
+
+show_help() {
+    awk 'NR == 1      { next }             # shebang
+         /^# \(c\)/   { next }             # ownership line, not help text
+         /^# author:/ { next }             # provenance marker, not help text
+         /^#/         { sub(/^# ?/, ""); print; next }
+                      { exit }' "$0"
+}
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+    -h | --help | help) show_help; exit 0 ;;
+    -n | --dry-run | dry-run) DRY=1; shift ;;
+    -m | --max | max)
+        MAX="${2:?-m needs a number}"
+        [[ "$MAX" =~ ^[0-9]+$ ]] && ((MAX > 0)) || { status fail "-m needs a positive integer, got: $MAX"; exit 64; }
+        shift 2
+        ;;
+    -r | --reorder | reo | reorder) RENUM=1; shift ;;
+    -l | --list | list)
+        LIST=1
+        # The count is OPTIONAL, so $2 is consumed only when it actually looks
+        # like one — otherwise a bare `ss list` would eat the next flag.
+        if [[ "${2:-}" =~ ^([0-9]+|all)$ ]]; then
+            [[ "$2" == all ]] && LIMIT=0 || LIMIT="$2"
+            shift 2
+        else
+            shift
+        fi
+        ;;
+    -x | --delete | del) DEL=1; shift ;;
+    -d | --dir | dir) DIR="${2:?-d needs a directory}"; shift 2 ;;
+    -*) printf 'ss: unknown option: %s (try -h)\n' "$1" >&2; exit 64 ;;
+    # Trailing comma tolerated, as `fnd` does — `ss del 5, 7, 9` is the form
+    # people actually type when reading a list off the screen.
+    *) TARGETS+=("${1%,}"); shift ;;
+    esac
+done
+
+[[ -d "$DIR" ]] || { status fail "no such directory: $DIR"; exit 66; }
+
+# These are early-exit modes that never reach the rename loop, and they run in
+# file order — so without this guard `ss -l -r` would silently compact instead
+# of listing, and `ss -x -r` would compact instead of deleting.
+((LIST + RENUM + DEL > 1)) && { status fail "-l, -r and -x do different things — pick one"; exit 64; }
+
+# Captures land in DIR (macOS writes them there); renamed files live in DEST.
+# The slot scan below therefore reads DEST, not DIR — the numbering state is
+# wherever the ss-N files ended up, not where the raw captures arrive.
+DEST="${SS_DEST:-$DIR/Screenshots}"
+mkdir -p "$DEST" 2>/dev/null || { status fail "cannot create $DEST"; exit 73; }
+
+# ── Compaction (-r) ─────────────────────────────────────────────────────────
+# Squeezes the numbers already in DEST down into 1..N, ordered by capture time,
+# reclaiming every gap at once. Run it occasionally when deletions have left the
+# range sparse — it is the deliberate counterpart to the automatic recycling,
+# which only kicks in under pressure.
+#
+# Matches ONLY the exact managed form (<stem><digits>.<ext>) — never a plain
+# glob like [0-9]*.png, which would also sweep up a file you named yourself,
+# e.g. "2026-chart.png".
+#
+# Two-phase via a .ssren- staging name: going 132 -> 1 directly can collide with
+# an existing 1, and mv -n would silently skip it, leaving a half-compacted range.
+if ((RENUM)); then
+    order=()
+    while IFS= read -r f; do
+        b="${f##*/}"
+        [[ "$b" =~ ^${STEM}[0-9]+\.[A-Za-z0-9]+$ ]] || continue
+        order+=("$f")
+    done < <(
+        stat -f '%m	%N' "$DEST/$STEM"[0-9]*.* 2>/dev/null | sort -n -k1,1 | cut -f2-
+    )
+
+    total=${#order[@]}
+    ((total)) || { status warn "nothing to compact in $DEST"; exit 0; }
+    ((total <= MAX)) || {
+        status fail "$total files but MAX is $MAX — raise the ceiling with -m or delete some first"
+        exit 75
+    }
+
+    if ((DRY)); then
+        for i in "${!order[@]}"; do
+            b="${order[i]##*/}"; e="${b##*.}"
+            [[ "$b" == "$STEM$((i + 1)).$e" ]] || printf '  %s  →  %s\n' "$b" "$STEM$((i + 1)).$e"
+        done
+        status warn "dry run — would compact $total file(s) into $STEM"1..$STEM"$total, nothing changed"
+        exit 0
+    fi
+
+    for i in "${!order[@]}"; do
+        e="${order[i]##*.}"
+        mv -n -- "${order[i]}" "$DEST/.ssren-$((i + 1)).$e" 2>/dev/null || {
+            status fail "staging failed on ${order[i]##*/} — folder left partly staged, re-run -r"
+            exit 1
+        }
+    done
+    moved=0
+    for f in "$DEST"/.ssren-[0-9]*.*; do
+        [[ -e "$f" ]] || continue
+        b="${f##*/}"
+        mv -n -- "$f" "$DEST/$STEM${b#.ssren-}" 2>/dev/null && ((moved++))
+    done
+    status ok "compacted $moved screenshot(s) → $STEM"1"..$STEM$moved (oldest first)"
+    exit 0
+fi
+
+# Which slots are taken. Indexed by number so lookup is O(1) in the loop below.
+used=()
+occupied=0
+for f in "$DEST/$STEM"[0-9]*.*; do
+    [[ -e "$f" ]] || continue
+    n="${f##*/}"; n="${n#"$STEM"}"; n="${n%%.*}"
+    [[ "$n" =~ ^[0-9]+$ ]] || continue
+    used[n]=1
+    ((occupied++))
+done
+
+# Two allocation modes, switched by pressure.
+#
+# Below PRESSURE_PCT: hand out slots ABOVE the current high-water mark, so
+# numbering runs straight up and keeps tracking capture order for as long as
+# the range comfortably allows. Gaps from deletions are left alone.
+#
+# At or above it: switch to lowest-free-first and start reclaiming those gaps.
+# Numbers stop tracking time from here, which is the price of not running out.
+# mtime is never modified, so date order always remains recoverable.
+RECYCLE_AT=$((MAX * PRESSURE_PCT / 100))
+TAG_AT=$((MAX * TAG_PCT / 100))
+high=0
+for ((i = MAX; i >= 1; i--)); do
+    [[ -n "${used[i]:-}" ]] && { high=$i; break; }
+done
+
+# The free list must ALWAYS end up holding every unused slot, so that
+# ${#free[@]} == avail below. They used to diverge: the else branch stopped at
+# the high-water mark, so once `high` reached MAX it scanned an empty range and
+# produced NOTHING while `avail` still reported dozens free. The run then sailed
+# past the `avail > 0` guard and died mid-loop with "ran out of slots" and 35
+# slots standing empty. Order is the only thing the two branches may differ on.
+free=()
+if ((occupied >= RECYCLE_AT)); then
+    # Under pressure — lowest free slot first, reclaiming gaps immediately.
+    for ((i = 1; i <= MAX; i++)); do
+        [[ -n "${used[i]:-}" ]] || free+=("$i")
+    done
+else
+    # Below pressure the numbers still track capture time, so hand out slots
+    # ABOVE the high-water mark first…
+    for ((i = high + 1; i <= MAX; i++)); do
+        [[ -n "${used[i]:-}" ]] || free+=("$i")
+    done
+    # …then fall back to the gaps below it rather than failing. Recycling early
+    # is a nicety; recycling when there is nowhere else to go is mandatory.
+    for ((i = 1; i <= high; i++)); do
+        [[ -n "${used[i]:-}" ]] || free+=("$i")
+    done
+fi
+avail=$((MAX - occupied))   # equals ${#free[@]} in both branches
+
+# -l and -x are exempt: a full range is exactly when you want to look at what
+# is in there, and exactly when you need to delete something to make room.
+# Aborting the one command that frees slots because no slots are free would
+# leave the folder permanently stuck.
+if ((avail == 0 && !LIST && !DEL)); then
+    status fail "all $MAX slots in use — delete some ${STEM}N files to free numbers, or raise the ceiling with -m"
+    exit 75
+fi
+
+# Remaining-slot line, printed under the status line inside the warning window.
+# Colour goes to a TTY only: raw escapes in a pipe or logfile are a bug.
+#
+# Printed straight to stdout, never captured into a variable: inside `$( )`
+# stdout is a pipe by construction, so `[[ -t 1 ]]` is false there and the
+# colour could never render however real the caller's terminal was.
+slot_line() {
+    local left=$1
+    # Floor. After a rename the lowest honest value is 1 — a slot was just
+    # used, and a bare 0 would read as "already full", contradicting the ✓ on
+    # the line above. A read-only listing renames nothing, so it passes 0 and
+    # reports an exhausted range as exhausted.
+    local floor=${2:-1}
+    local window=$((MAX - TAG_AT))          # size of the display zone
+    ((left <= window && window > 0)) || return
+    ((left < floor)) && left=$floor
+
+    # Bands are QUADRATIC, not linear: band = 10·((window-left)/window)².
+    # Linear bands would turn amber halfway through the zone and red with a
+    # third of it left, crying wolf while there is still room. Squaring keeps
+    # the ramp green across most of the window and compresses the hot colours
+    # into the final few slots, so red means genuinely last-slot.
+    #   window=25 → 25-16 green · 13 band2 · 8 band4 · 4 band7 · 1 RED
+    local used_in_zone=$((window - left))
+    local band=$((10 * used_in_zone * used_in_zone / (window * window)))
+    ((band > 9)) && band=9
+    ((band < 0)) && band=0
+    if [[ -t 1 ]]; then
+        # 3 = italic, so the count reads as an aside under the status line.
+        # ,→; on the way out: the palette is stored R,G,B to match
+        # REFS/palettes.html, but SGR wants R;G;B and silently ignores commas.
+        printf '  \033[3;38;2;%sm%d left for max\033[0m\n' "${GYR[band]//,/;}" "$left"
+    else
+        printf '  %d left for max\n' "$left"
+    fi
+}
+
+# ── Listing (-l) ────────────────────────────────────────────────────────────
+# Read-only. Ordered by CAPTURE TIME, never by number: the numbers are recycled
+# slots, so 50 can be newer than 90 and a numeric sort would misrepresent the
+# folder outright. NEWEST FIRST — the recent captures are the ones you are
+# looking for, and they sit closest to the command you just typed.
+#
+# Files you named yourself share the folder but are never renamed. They are
+# listed and marked rather than hidden — a listing that omitted them would
+# understate what is actually in there. Subdirectories are skipped: this lists
+# files, and a folder has no capture time of its own worth showing.
+#
+# Every file is COUNTED even when only LIMIT of them print, so the summary
+# describes the folder rather than the excerpt — a truncated listing that also
+# truncated its own totals would be quietly wrong.
+#
+# The summary is TTY-only, like every other decoration in this script. Piped,
+# `ss -l` is exactly one line per file shown, so `ss list all | wc -l` counts
+# the folder.
+if ((LIST)); then
+    listed=0
+    numbered=0
+    shown=0
+    while IFS=$'\t' read -r mt f; do
+        [[ -f "$f" ]] || continue
+        b="${f##*/}"
+        if [[ "$b" =~ ^${STEM}[0-9]+\.[A-Za-z0-9]+$ ]]; then
+            mark=""
+            ((numbered++))
+        else
+            mark="  named"
+        fi
+        ((listed++))
+        ((LIMIT == 0 || shown < LIMIT)) || continue
+        printf '%s  %s%s\n' "$(date -r "$mt" '+%d-%b %H:%M')" "$b" "$mark"
+        ((shown++))
+    done < <(stat -f '%m	%N' "$DEST"/* 2>/dev/null | sort -rn -k1,1)
+
+    if [[ -t 1 ]]; then
+        if ((!listed)); then
+            printf 'nothing in %s\n' "$DEST"
+        elif ((shown < listed)); then
+            printf '\nshowing %d of %d — %d numbered, %d named · ss list all\n' \
+                "$shown" "$listed" "$numbered" "$((listed - numbered))"
+            slot_line "$avail" 0
+        else
+            noun=file; ((listed > 1)) && noun=files
+            printf '\n%d %s — %d numbered, %d named\n' \
+                "$listed" "$noun" "$numbered" "$((listed - numbered))"
+            slot_line "$avail" 0
+        fi
+    fi
+    exit 0
+fi
+
+# ── Delete (-x) ─────────────────────────────────────────────────────────────
+# Screenshots taken to look at once and then void. Goes to the TRASH, never
+# rm: "most of them are temporary" is not "all of them are", and Put Back
+# costs nothing while a wrong rm costs the file.
+#
+# Bare `ss -x` takes the newest NUMBERED file. Files you named yourself are
+# never the target of the bare form — naming one is a deliberate act, so it is
+# not the throwaway the bare form assumes. Name it explicitly to delete it.
+#
+# Targets accept a bare number (5), a filename (5.png), or a path, so whatever
+# you just read off `ss -l` works verbatim.
+if ((DEL)); then
+    # An external binary is a system boundary, so check it rather than assume.
+    # Never silently fall back to rm: that would turn the recoverable
+    # operation the user asked for into an unrecoverable one.
+    TRASH=/usr/bin/trash
+    [[ -x "$TRASH" ]] || {
+        status fail "$TRASH not found — refusing to fall back to rm, which cannot be undone"
+        exit 69
+    }
+
+    victims=()
+    if ((${#TARGETS[@]})); then
+        for t in "${TARGETS[@]}"; do
+            hit=""
+            if [[ "$t" =~ ^[0-9]+$ ]]; then
+                # Extension unknown: screen RECORDINGS land here too, as .mov.
+                for c in "$DEST/$STEM$t".*; do [[ -f "$c" ]] && { hit="$c"; break; }; done
+            elif [[ -f "$DEST/$t" ]]; then hit="$DEST/$t"
+            elif [[ -f "$t" ]]; then hit="$t"
+            fi
+            [[ -n "$hit" ]] && victims+=("$hit") || printf '  no such screenshot: %s\n' "$t" >&2
+        done
+    else
+        newest=$(
+            stat -f '%m	%N' "$DEST/$STEM"[0-9]*.* 2>/dev/null | sort -rn -k1,1 | cut -f2- | head -1
+        )
+        [[ -n "$newest" ]] && victims+=("$newest")
+    fi
+
+    ((${#victims[@]})) || { status warn "nothing to delete in $DEST"; exit 0; }
+
+    if ((DRY)); then
+        for v in "${victims[@]}"; do printf '  %s  →  trash\n' "${v##*/}"; done
+        status warn "dry run — ${#victims[@]} file(s) would go to the trash, nothing changed"
+        exit 0
+    fi
+
+    # Names are collected INSIDE the loop, on success only. Building the list
+    # from `victims` up front would name a file as trashed that had just
+    # failed to trash — a report of the intent, not of what happened.
+    trashed=0
+    gone=()
+    for v in "${victims[@]}"; do
+        # if/else, NOT `cmd && ((trashed++)) || printf`: post-increment returns
+        # the OLD value, so the first success (0 → false) would take the ||
+        # branch and report a failure that did not happen.
+        if "$TRASH" "$v" 2>/dev/null; then
+            b="${v##*/}"; gone+=("${b%.*}"); ((trashed++))
+        else
+            printf '  could not trash: %s\n' "${v##*/}" >&2
+        fi
+    done
+    ((trashed)) || { status fail "nothing was trashed — see errors above"; exit 1; }
+
+    list="${gone[0]}"
+    for i in "${gone[@]:1}"; do list+=", $i"; done
+    noun=screenshot; ((trashed > 1)) && noun=screenshots
+    stuck=$((${#victims[@]} - trashed))
+
+    if ((stuck)); then
+        status warn "trashed $trashed $noun → $list · $stuck failed"
+        slot_line $((avail + trashed)) 0
+        exit 1
+    fi
+    status ok "trashed $trashed $noun → $list"
+    slot_line $((avail + trashed)) 0
+    exit 0
+fi
+
+renamed=0
+failed=0
+assigned=()
+
+# Process in CAPTURE-TIME order, not filename order (do not revert to a plain
+# glob). macOS does not zero-pad the hour, so "at 10.53.17 PM" sorts before
+# "at 9.03.20 PM" lexically while being 100 minutes later, and AM/PM does not
+# compare lexically at all. Sorting on mtime keeps a batch in real order.
+#
+# Fed by process substitution, not a pipe: a pipeline would run the loop in a
+# subshell and every counter below would be lost on exit.
+while IFS= read -r f; do
+    [[ -e "$f" ]] || continue
+    ((${#free[@]})) || { status warn "ran out of slots mid-run — $renamed renamed, rest skipped"; break; }
+
+    base="${f##*/}"
+    ext="${base##*.}"
+    slot="${free[0]}"
+    target="$DEST/$STEM$slot.$ext"
+
+    # A slot free by number can still collide on another extension.
+    if [[ -e "$target" ]]; then free=("${free[@]:1}"); continue; fi
+
+    if ((DRY)); then
+        printf '  %s  →  %s\n' "$base" "$STEM$slot.$ext"
+        assigned+=("$slot"); free=("${free[@]:1}"); ((renamed++))
+    elif mv -n -- "$f" "$target" 2>/dev/null && [[ -e "$target" ]]; then
+        assigned+=("$slot"); free=("${free[@]:1}"); ((renamed++))
+    else
+        printf 'ss: could not rename %s\n' "$base" >&2
+        ((failed++))
+    fi
+done < <(
+    # mtime-sorted candidates. A tab separates key from path so filenames with
+    # spaces survive the cut; capture names never contain tabs or newlines.
+    stat -f '%m	%N' "$DIR"/Screenshot*.* "$DIR"/"Screen Recording"*.* 2>/dev/null |
+        sort -n -k1,1 | cut -f2-
+)
+
+left=$((avail - renamed))
+
+if ((DRY)); then
+    if ((renamed)); then
+        status warn "dry run — $renamed file(s) would be renamed, nothing changed"
+        slot_line "$left"
+    else status warn "nothing to rename in $DIR"; fi
+elif ((failed)); then
+    # To stderr, following the status line it belongs to — otherwise a
+    # redirect would split the two readings across different streams.
+    status fail "renamed $renamed, FAILED on $failed — see errors above"
+    slot_line "$left" >&2
+    exit 1
+elif ((renamed)); then
+    # Report the numbers actually handed out, in the order used. Never a
+    # "next is" hint — that names a file which does not exist yet.
+    if ((${#assigned[@]} > 8)); then
+        list="$STEM${assigned[0]}…${assigned[-1]}"
+    else
+        list="$STEM${assigned[0]}"
+        for i in "${assigned[@]:1}"; do list+=", $i"; done
+    fi
+    noun=screenshot; ((renamed > 1)) && noun=screenshots
+    status ok "$renamed $noun → $list"
+    slot_line "$left"
+else
+    status warn "nothing to rename in $DIR"
+fi
+exit 0

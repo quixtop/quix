@@ -12,7 +12,7 @@ curl -fsSL https://quixtop.com/i | sh -s -- pendings
 
 Invoke it as `/pendings` in Claude Code.
 
-End-of-session sweep of the CURRENT conversation for anything the user may have missed — unanswered questions, undecided choices, pending/deferred work, unclaimed offers, warnings flagged in passing, manual checks still owed. Read-only; reads the raw transcript when compacted. Use before wrapping up or /handoff, or on 'did I miss anything?' / 'what's still open?'.
+End-of-session sweep of the CURRENT conversation for anything the user may have missed — unanswered questions, undecided choices, deferred work, unclaimed offers, warnings flagged in passing, checks still owed. Read-only; `topic:<words>` scopes it. Use before wrapping up, or on 'did I miss anything?' / 'what's still open?'.
 
 ## Source
 

@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "f3593120-694d-4640-8f02-4a2113d794a7",
+  "status": "current",
+  "command": "deliver",
+  "type": "architecture",
+  "input": "/Users/shrix/.agents/skills/secscan/docs/arch/archify.json",
+  "output": "/Users/shrix/.agents/skills/secscan/docs/arch/archify.html",
+  "specification": {
+    "sha256": "f27434d8c123c5f543d08614b126729af889bfde0d4e86c5bc3e37d373e26b34",
+    "bytes": 4462
+  },
+  "artifact": {
+    "sha256": "e1c05084e6df94fa4262f866f4575d4650a9cafabf5abf115100de8797dfecc2",
+    "bytes": 775746
+  }
+}

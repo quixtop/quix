@@ -1,0 +1,149 @@
+{
+  "version": 1,
+  "meta": {
+    "project": "secscan",
+    "owner": "shrix",
+    "spelling": "en-US"
+  },
+  "dictionary": [
+    {
+      "word": "engine",
+      "pos": "n",
+      "meaning": "one of the eight external scanners scan.py runs (keyscan, trivy, semgrep, zizmor, actionlint, skillspector, hadolint, gosec)",
+      "example": "Each ENGINE runs in its own process group.",
+      "not": [
+        "scanner",
+        "tool"
+      ]
+    },
+    {
+      "word": "finding",
+      "pos": "n",
+      "meaning": "one root cause that an engine reports, after the merge and the verification",
+      "example": "The report lists each FINDING one time.",
+      "not": [
+        "hit",
+        "issue",
+        "alert"
+      ]
+    },
+    {
+      "word": "mirror",
+      "pos": "n",
+      "meaning": "the masked copy of the repository that scan.py mirror writes; the only code the verifiers and the called tools read",
+      "example": "The verifier reads files in the MIRROR only.",
+      "not": [
+        "copy",
+        "snapshot"
+      ]
+    },
+    {
+      "word": "coverage gap",
+      "pos": "n",
+      "meaning": "an engine that is missing, blocked, refused, failed or without data",
+      "example": "A COVERAGE GAP is never a pass.",
+      "not": [
+        "skip",
+        "miss"
+      ]
+    },
+    {
+      "word": "verifier",
+      "pos": "n",
+      "meaning": "a fresh isolated subagent that judges one candidate through one lens",
+      "example": "Three VERIFIERS vote on a high finding.",
+      "not": [
+        "checker",
+        "judge"
+      ]
+    },
+    {
+      "word": "precedent",
+      "pos": "n",
+      "meaning": "an owner decision in docs/security/precedents.md that marks one place as not a finding",
+      "example": "A PRECEDENT applies only to the place it names.",
+      "not": [
+        "exception",
+        "waiver"
+      ]
+    }
+  ],
+  "anatomy": [
+    {
+      "file": "docs/arch.md",
+      "line": 9,
+      "type": "descriptive",
+      "original": "Verification by fresh isolated subagents, three lenses, a fixed vote table; engine-category findings get a lens that judges only whether the match is real; inline and labelled when secscan runs nested — why: an author grading its own finding confirms it.",
+      "ste": "Fresh, isolated subagents verify each finding through three lenses. A fixed vote table gives the verdict. For an engine finding, the verifier checks only that the match is real. When secscan runs inside a different skill, Claude verifies the finding and labels it. Reason: an author who grades its own finding confirms it.",
+      "notes": [
+        {
+          "text": "subagents verify",
+          "note": "a verb shows the action, not the noun 'verification' (3.7)",
+          "tone": "ok"
+        },
+        {
+          "text": "five sentences",
+          "note": "no semicolons (8.1); each sentence under 25 words (6.3)",
+          "tone": "ok"
+        },
+        {
+          "text": "labels",
+          "note": "American spelling, not 'labelled' (1.14)",
+          "tone": "fix"
+        },
+        {
+          "text": "verifier",
+          "note": "technical noun from the project dictionary",
+          "tone": "term"
+        }
+      ]
+    },
+    {
+      "file": "docs/arch.md",
+      "line": 12,
+      "type": "descriptive",
+      "original": "A known-bad engine is identified without running it (install path, Go build info) — why: a compromised binary must not run even once.",
+      "ste": "scan.py reads the version of an engine from its install path or from its Go build information. Thus, a compromised binary does not run one time.",
+      "notes": [
+        {
+          "text": "scan.py reads",
+          "note": "active voice names the agent, not 'is identified' (3.6)",
+          "tone": "ok"
+        },
+        {
+          "text": "from its install path",
+          "note": "a clause replaces the -ing form 'without running' (3.5)",
+          "tone": "fix"
+        },
+        {
+          "text": "Thus,",
+          "note": "a connecting word links the reason (4.4)",
+          "tone": "info"
+        }
+      ]
+    }
+  ],
+  "history": [
+    {
+      "date": "2026-10-24",
+      "score": 23,
+      "sentences": 13,
+      "fails": 23,
+      "checks": 15
+    },
+    {
+      "date": "2026-10-25",
+      "score": 23,
+      "sentences": 13,
+      "fails": 23,
+      "checks": 17
+    },
+    {
+      "date": "2026-10-26",
+      "score": 23,
+      "sentences": 13,
+      "fails": 23,
+      "checks": 18
+    }
+  ]
+}

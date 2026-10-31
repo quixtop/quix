@@ -9,7 +9,7 @@ metadata:
 
 # Test Generator
 
-Generate tests and analyze coverage for comprehensive testing.
+Generate tests and analyze coverage.
 
 ## Modes
 
@@ -26,7 +26,7 @@ Generate tests and analyze coverage for comprehensive testing.
 | Framework | Language | Test File Pattern |
 |-----------|----------|-------------------|
 | pytest | Python | `test_*.py`, `*_test.py` |
-| Jest / Bun / Vitest | JavaScript | `*.test.js`, `*.spec.js` |
+| Jest / Bun / Vitest | JavaScript | `*.test.*`, `*.spec.*` |
 | Go testing | Go | `*_test.go` |
 
 ---
@@ -70,10 +70,6 @@ Don't waste time testing:
 
 ### Test-Driven Debugging
 
-```
-Bug reported → Write failing test first → Fix bug → Test passes → Never regresses
-```
-
 **Every bug is a missing test.** Before fixing, write the test that would have caught it.
 
 ---
@@ -107,7 +103,7 @@ Language-specific test patterns with full examples for each framework:
 # Python
 test -f pytest.ini || test -f pyproject.toml
 
-# JavaScript
+# JS
 test -f jest.config.js || grep "jest" package.json
 
 # Go
@@ -117,20 +113,16 @@ ls *_test.go 2>/dev/null
 test -f Cargo.toml
 ```
 
-### Step 2: Identify Untested Code
+### Step 2: Find Untested Code
 
-**Python**:
 ```bash
-# Count functions
-grep -r "^def " src/ --include="*.py" | wc -l
-grep -r "^def test_" tests/ --include="*.py" | wc -l
-```
+# Python: defs/tests
+grep -rE '^[[:space:]]*(async )?def ' src/ --include="*.py" | wc -l
+grep -rE '^[[:space:]]*(async )?def test_' tests/ --include="*.py" | wc -l
 
-**JavaScript**:
-```bash
-# Count exports
-grep -r "export.*function" src/ --include="*.js" --include="*.ts" | wc -l
-grep -r "describe\|it\|test" tests/ --include="*.test.js" | wc -l
+# JS: exports/tests
+grep -r "export.*function" src/ --include='*.'{js,jsx,ts,tsx,mjs,cjs} | wc -l
+grep -rE '^[[:space:]]*[xf]?(it|test)(\.(only|skip|todo|each|failing))*[(`]' tests/ --include='*.'{test,spec}.{js,jsx,ts,tsx,mjs,cjs} | wc -l
 ```
 
 ### Step 3: Coverage Report
@@ -203,7 +195,7 @@ Priority 3 (MEDIUM):
 
 Priority 4 (LOW):
 - Constants/enums
-- Simple getters/setters
+- Getters/setters with a little logic (pure pass-throughs: not tested)
 - Logging functions
 ```
 
@@ -243,17 +235,6 @@ describe('fetch', () => {
 
 ## Skill Integration
 
-### Workflow Position
-
-```
-spec → implement → test → codedoc
-              ↓
-          security
-```
-
-(`implement` and `security` are currently disabled — the live neighbors are
-`/spec`, `/refactor`, and `/codedoc`.)
-
 ### When to Use
 
 | Trigger | Mode |
@@ -267,9 +248,7 @@ spec → implement → test → codedoc
 
 | Skill | Relationship |
 |-------|--------------|
-| `implement` (disabled) | Tests follow implementation |
-| `refactor` | Verify behavior preserved |
-| `security` (disabled) | Security test cases |
+| `security-review` | Security test cases |
 
 ---
 

@@ -1,0 +1,142 @@
+{
+  "_about": "(c) Shrix — author: shrix. Sheet 2 of every docs/arch/ste100.html: ASD-STE100 restated in our own words, with our own examples. Word statuses and history facts were checked against Issue 9 (January 2025). The ASD text and dictionary are copyrighted and are not reproduced here.",
+  "title": {
+    "title": "Simplified Technical English: overview",
+    "cells": [
+      {"label": "Specification", "value": "ASD-STE100 Issue 9 (January 2025)"},
+      {"label": "Owner", "value": "ASD, maintained by the STEMG"},
+      {"label": "Original domain", "value": "Aerospace maintenance"},
+      {"label": "Content", "value": "53 rules · 9 sections · 8 recommendations"},
+      {"label": "Source", "value": "asd-ste100.org (free download)"},
+      {"label": "Sheet", "value": "2 of 2"}
+    ]
+  },
+  "panels": {
+    "A": {
+      "title": "Document structure",
+      "tag": "ASD-STE100 specification",
+      "root": {"title": "ASD-STE100", "sub": "Simplified Technical English"},
+      "branches": [
+        {"title": "Part 1: Writing rules", "items": [
+          {"k": "Section 1", "label": "Words"},
+          {"k": "Section 2", "label": "Multi-word nouns"},
+          {"k": "Section 3", "label": "Verbs"},
+          {"k": "Section 4", "label": "Sentences"},
+          {"k": "Section 5", "label": "Procedural writing"},
+          {"k": "Section 6", "label": "Descriptive writing"},
+          {"k": "Section 7", "label": "Safety instructions"},
+          {"k": "Section 8", "label": "Punctuation and word count"},
+          {"k": "Section 9", "label": "Writing practices"}
+        ]},
+        {"title": "Part 2: Dictionary", "items": [
+          {"k": "", "label": "Approved words", "sub": "UPPERCASE: one meaning, one part of speech"},
+          {"k": "", "label": "Words not approved", "sub": "lowercase, with an approved alternative"},
+          {"k": "", "label": "Technical nouns", "sub": "the names your field uses for things"},
+          {"k": "", "label": "Technical verbs", "sub": "the verbs your field uses for actions"}
+        ]}
+      ],
+      "note": "A rule number names its section: rule 5.1 is in section 5. Section 9 also gives 8 general recommendations (GR-1 to GR-8)."
+    },
+    "B": {
+      "title": "Anatomy of STE sentences",
+      "tag": "annotated examples",
+      "original": {
+        "label": "Original text, not STE: words to replace are in red",
+        "text": "It is imperative that the operator ensures the cache files are purged prior to commencing the update.",
+        "marks": [
+          {"span": "It is imperative that", "tone": "bad", "tip": "rule 4.1 · say it as a command"},
+          {"span": "ensures", "tone": "bad", "tip": "rule 1.1 · ensure is not approved → MAKE SURE"},
+          {"span": "are purged", "tone": "bad", "tip": "rule 3.6 · passive; purge is not approved → REMOVE"},
+          {"span": "prior to", "tone": "bad", "tip": "rule 1.1 · prior to is not approved → BEFORE"},
+          {"span": "commencing", "tone": "bad", "tip": "rules 1.1 + 3.5 · commence → START, and no -ing verb"}
+        ]
+      },
+      "items": [
+        {"heading": "Procedural sentence: the same instruction, rewritten", "ste": "Make sure that you remove the cache files before you start the update.",
+         "limit": 20, "spans": [
+          {"text": "Make sure", "note": "approved verb, command form", "tone": "ok"},
+          {"text": "remove", "note": "not \"purge\"", "tone": "ok"},
+          {"text": "cache files", "note": "technical noun, 2 words (max 3)", "tone": "term"},
+          {"text": "before you start", "note": "a clause, not \"prior to commencing\"", "tone": "ok"}
+        ]},
+        {"heading": "Safety instruction", "ste": "CAUTION: Do not stop the server during the update. If you stop it, the data can become incorrect.",
+         "limit": 20, "spans": [
+          {"text": "CAUTION:", "note": "caution = risk of damage · warning = risk of injury", "tone": "fix"},
+          {"text": "Do not stop the server during the update.", "note": "first: a clear command", "tone": "info"},
+          {"text": "If you stop it, the data can become incorrect.", "note": "then: the risk", "tone": "info"}
+        ]},
+        {"heading": "Descriptive sentence", "ste": "The scheduler starts the backup at 02:00 UTC.",
+         "limit": 25, "spans": [
+          {"text": "starts", "note": "simple present tense", "tone": "ok"},
+          {"text": "backup", "note": "technical noun", "tone": "term"}
+        ]}
+      ],
+      "foot": "Procedural max 20 words · descriptive max 25 words · max 6 sentences per paragraph · one topic per paragraph."
+    },
+    "C": {
+      "title": "Verb forms",
+      "tag": "section 3",
+      "rows": [
+        {"form": "Command (imperative)", "example": "Stop the server.", "status": "ok"},
+        {"form": "Simple present", "example": "The server stops.", "status": "ok"},
+        {"form": "Simple past", "example": "The server stopped.", "status": "ok"},
+        {"form": "Simple future", "example": "The server will stop.", "status": "ok"},
+        {"form": "Infinitive", "example": "Use the script to stop the server.", "status": "ok"},
+        {"form": "Past participle (as adjective)", "example": "The stopped server", "status": "ok"},
+        {"form": "Progressive (-ing)", "example": "The server is stopping.", "status": "bad", "marks": [{"span": "is stopping", "tone": "bad"}]},
+        {"form": "Perfect", "example": "The server has stopped.", "status": "bad", "marks": [{"span": "has stopped", "tone": "bad"}]},
+        {"form": "Passive, in procedures", "example": "The server must be stopped.", "status": "bad", "marks": [{"span": "must be stopped", "tone": "bad"}]}
+      ],
+      "note": "Use the -ing form only inside a technical noun, for example \"load balancing\". Descriptive text can use the passive only when you do not know who does the action."
+    },
+    "D": {
+      "title": "Dictionary entries",
+      "tag": "part 2 format · our examples",
+      "rows": [
+        {"word": "approximately", "pos": "adv", "status": "ok", "meaning": "near a given value", "good": "Wait APPROXIMATELY 10 minutes.", "bad": ""},
+        {"word": "ensure", "pos": "v", "status": "bad", "meaning": "MAKE SURE", "good": "MAKE SURE THAT the tests pass.", "bad": "Ensure the tests pass."},
+        {"word": "commence", "pos": "v", "status": "bad", "meaning": "START", "good": "START the update.", "bad": "Commence the update."},
+        {"word": "utilize", "pos": "v", "status": "bad", "meaning": "USE", "good": "USE the staging database.", "bad": "Utilize the staging database."},
+        {"word": "prior to", "pos": "prep", "status": "bad", "meaning": "BEFORE", "good": "BEFORE you start the update, stop the server.", "bad": "Prior to the update, stop the server."},
+        {"word": "purge", "pos": "v", "status": "bad", "meaning": "REMOVE", "good": "REMOVE the cache files.", "bad": "Purge the cache files."},
+        {"word": "perform", "pos": "v", "status": "bad", "meaning": "DO", "good": "DO the migration first.", "bad": "Perform the migration first."},
+        {"word": "should", "pos": "v", "status": "bad", "meaning": "MUST", "good": "You MUST change the key.", "bad": "You should change the key."},
+        {"word": "may", "pos": "v", "status": "bad", "meaning": "CAN", "good": "The job CAN fail.", "bad": "The job may fail."},
+        {"word": "via", "pos": "prep", "status": "bad", "meaning": "THROUGH", "good": "Send the data THROUGH the proxy.", "bad": "Send the data via the proxy."}
+      ],
+      "note": "Approved words are UPPERCASE, words not approved are lowercase. An approved word keeps one meaning and one part of speech. These examples are ours; the full dictionary is a free download from asd-ste100.org."
+    },
+    "E": {
+      "title": "Writing rule limits",
+      "tag": "maximum values",
+      "bars": [
+        {"label": "Procedural sentence", "value": null, "fill_limit": true, "limit": 20, "axis": 30, "unit": "words"},
+        {"label": "Descriptive sentence", "value": null, "fill_limit": true, "limit": 25, "axis": 30, "unit": "words"},
+        {"label": "Descriptive paragraph", "value": null, "fill_limit": true, "limit": 6, "axis": 10, "unit": "sentences"},
+        {"label": "Multi-word noun", "value": null, "fill_limit": true, "limit": 3, "axis": 5, "unit": "words"},
+        {"label": "Instructions in each sentence", "value": null, "fill_limit": true, "limit": 1, "axis": 3, "unit": "(except actions at the same time)"}
+      ],
+      "practices": [
+        {"text": "Use the same word for the same thing every time.", "status": "ok"},
+        {"text": "Do not leave out words like \"the\", \"a\" and \"this\".", "status": "ok"},
+        {"text": "Use the active voice in procedures.", "status": "ok"},
+        {"text": "Use vertical lists for complex text.", "status": "ok"},
+        {"text": "Write one topic in each paragraph.", "status": "ok"},
+        {"text": "Do not use semicolons, contractions or phrasal verbs.", "status": "ok"}
+      ]
+    },
+    "F": {
+      "kind": "timeline",
+      "title": "History",
+      "tag": "from the Issue 9 introduction",
+      "points": [
+        {"year": "Late 1970s", "text": "European airlines ask AECMA to make maintenance texts easier to read"},
+        {"year": "1983", "text": "The AECMA Simplified English Working Group starts"},
+        {"year": "1986", "text": "First AECMA Simplified English Guide"},
+        {"year": "2005", "text": "Becomes ASD-STE100 (Issue 3)"},
+        {"year": "2025", "text": "Issue 9, free from the STEMG"}
+      ],
+      "note": "STEMG: the Simplified Technical English Maintenance Group of ASD."
+    }
+  }
+}

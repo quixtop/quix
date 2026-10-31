@@ -16,15 +16,22 @@ curl -fsSL https://quixtop.com/i | sh -s -- clear-nvim-swap
 ## Usage
 
 ```text
-clear-nvim-swap — remove Neovim swap files from the swap dir.
-Safe by design: refuses to run while nvim is open (live swaps must
-not be deleted), and supports a dry run. Clears stale swaps that
-trigger the "W325: Ignoring swapfile" warning.
+clear-nvim-swap — save and close running nvim sessions, then remove stale
+Neovim swap files (the ones behind "E325: ATTENTION" and "W325: Ignoring
+swapfile").
 
-  clear-nvim-swap                 delete stale swap files
-  clear-nvim-swap -n | --dry-run  list what would go, delete nothing
-  clear-nvim-swap -f | --force    delete even while nvim runs (risky)
-  clear-nvim-swap -h | --help     this help
+Each running nvim is shown — folder and open files — and closed only on
+your y: its session is saved first (open with the printed `nvim -S <file>`),
+then it quits. Never closed: an nvim with unsaved changes or a running
+:terminal, or a suspended (Ctrl-Z) one. A swap file whose nvim still runs
+is kept, so answering n is safe.
+
+Usage: clear-nvim-swap [-n|--dry-run|dry-run] [-y|--yes|yes] [-f|--force|force]
+  -n, --dry-run   show sessions and swap files, close and delete nothing
+  -y, --yes       close every closable session without asking
+  -f, --force     skip the sessions and delete every swap file, live ones too
+                  (a running nvim's swap is its crash-recovery data)
+  -h, --help      this help
 ```
 
 ## Source

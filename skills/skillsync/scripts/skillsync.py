@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# (c) Shrix
+# author: shrix
 """
 skillsync — Audit & repair the shrix skill naming/identity convention.
 
@@ -10,6 +12,9 @@ Checks every such skill dir in ~/.agents/skills/ (enabled) and
   2. SKILL.md frontmatter  name: <name>   (matches the dir name)
   3. SKILL.md frontmatter  author: shrix
   4. SKILL.md frontmatter  description: starts with (shrix)
+And, report-only, every reference one shrix skill makes to another (`/name`, or
+a path into skills/<name>/) in its SKILL.md, references/ or scripts/: it must
+sit inside a bundle, or be a listed mention, in CONVENTIONS.md § Bundles.
 
 Usage:
   skillsync.py [--fix] [--help]
@@ -18,15 +23,36 @@ Usage:
 Note: runctl-managed commands are out of scope — use 'runctl list' for those.
 """
 
+import atexit
 import os
 import re
 import sys
 from pathlib import Path
 
+atexit.register(lambda: sys.stdout.isatty() and print())   # trailing gap, TTY only
+
+
+def status(kind: str, msg: str) -> None:
+    """The one closing status line of an action: ✓ ok · ✗ fail · ⚠ warn, coloured on a TTY."""
+    glyph, colour = {"ok": ("✓", "32"), "fail": ("✗", "31"), "warn": ("⚠", "33")}[kind]
+    line = f"{glyph} {msg}"
+    print(f"\033[{colour}m{line}\033[0m" if sys.stdout.isatty() else line)
+
+
 HOME = Path.home()
 SKILLS_ENABLED  = HOME / ".agents" / "skills"
 SKILLS_DISABLED = HOME / ".agents" / "disabled-skills"
 CLAUDE_SKILLS   = HOME / ".claude" / "skills"
+CONVENTIONS     = SKILLS_ENABLED / "CONVENTIONS.md"
+# Where a skill's runtime text lives; docs/ is design history, never scanned.
+SCAN_DIRS       = ("references", "scripts")
+TICKED_NAME     = re.compile(r'`([a-z0-9][a-z0-9-]*)`')
+VENDORED        = {"node_modules", "vendor", ".venv", "venv", "__pycache__", ".git", "dist", "build"}
+
+# A YAML block-scalar header: `>` or `|`, then an optional indentation indicator
+# (1-9) and chomping indicator (+/-) in either order, then an optional comment —
+# `>-`, `>2`, `|-2`, `>2+`, `>- # note`.
+BLOCK_HEADER = re.compile(r'^[>|]([1-9][+-]?|[+-][1-9]?)?(\s+#.*)?$')
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -52,22 +78,44 @@ def parse_frontmatter(skill_md: Path) -> dict:
     if not lines or lines[0].strip() != "---":
         return result
 
+    block_key, block_lines, block_fold = None, [], True
     for line in lines[1:]:
         if line.strip() == "---":
             break
+        if block_key and (line.startswith((" ", "\t")) or not line.strip()):
+            block_lines.append(line.strip())             # body of a > or | block scalar
+            continue
+        if block_key:
+            result[block_key] = (" " if block_fold else "\n").join(x for x in block_lines if x)
+            block_key, block_lines = None, []
         m = re.match(r'^([\w][\w-]*):\s*(.*)', line)
         if m:
             key = m.group(1)
             val = m.group(2).strip()
+            if BLOCK_HEADER.match(val):                  # `description: >-` — value on the next lines
+                block_key, block_fold = key, val.startswith(">")
+                continue
             # Strip surrounding quotes (double or single) if present
             if len(val) >= 2 and val[0] == val[-1] and val[0] in ('"', "'"):
                 val = val[1:-1]
             result[key] = val
+    if block_key:
+        result[block_key] = (" " if block_fold else "\n").join(x for x in block_lines if x)
     return result
 
 
 def is_shrix_skill(skill_md: Path) -> bool:
-    """A skill is 'mine' iff its SKILL.md frontmatter declares author: shrix."""
+    """A skill is 'mine' iff its folder and SKILL.md are real (never links) and
+    the SKILL.md frontmatter block is closed and declares author: shrix — the
+    same test as allow-own-edits."""
+    if skill_md.parent.is_symlink() or skill_md.is_symlink() or not skill_md.is_file():
+        return False
+    try:
+        lines = skill_md.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    if not lines or lines[0].strip() != "---" or not any(x.strip() == "---" for x in lines[1:]):
+        return False
     return parse_frontmatter(skill_md).get("author", "") == "shrix"
 
 
@@ -168,13 +216,128 @@ def find_orphaned_symlinks() -> list[tuple[str, str, str]]:
     return orphans
 
 
+def parse_bundles(path: Path):
+    """
+    Read CONVENTIONS.md § Bundles: a `| bundle | skills |` table and a
+    `| skill | mentions |` table, names in backticks. Returns (bundles,
+    mentions) — a list of name sets and {skill: names it may mention} — or
+    None when the file or the section is absent.
+    """
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    start = next((i for i, l in enumerate(lines) if re.match(r'^#{2,3} Bundles\b', l)), None)
+    if start is None:
+        return None
+    level = len(lines[start]) - len(lines[start].lstrip("#"))
+    bundles, mentions, table, fenced = [], {}, None, False
+    for line in lines[start + 1:]:
+        if line.lstrip().startswith(("```", "~~~")):
+            fenced = not fenced                           # a `# line` in a code block is no heading
+            continue
+        if fenced:
+            continue
+        heading = re.match(r'^(#+) ', line)
+        if heading and len(heading.group(1)) <= level:
+            break
+        if not line.startswith("|"):
+            table = None
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) < 2 or set(cells[0]) <= set("-: "):
+            continue                                      # short row or the |---| line
+        head = cells[0].lower()
+        if head in ("bundle", "skill"):
+            table = "bundles" if head == "bundle" else "mentions"
+            continue
+        if table == "bundles":
+            bundles.append(set(TICKED_NAME.findall(cells[1])))
+        elif table == "mentions":
+            owner = TICKED_NAME.findall(cells[0])
+            if owner:
+                mentions.setdefault(owner[0], set()).update(TICKED_NAME.findall(cells[1]))
+    return bundles, mentions
+
+
+def skill_text_files(skill_dir: Path):
+    """SKILL.md plus every real file under references/ and scripts/ — symlinks
+    (runctl's links to ~/.local/bin) and docs/ are not the skill's own text."""
+    yield skill_dir / "SKILL.md"
+    for sub in SCAN_DIRS:
+        root = skill_dir / sub
+        if root.is_symlink() or not root.is_dir():
+            continue
+        for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+            dirnames[:] = [d for d in dirnames if d not in VENDORED]   # third-party code is not the skill's
+            for name in sorted(filenames):
+                p = Path(dirpath) / name
+                if not p.is_symlink() and p.is_file():
+                    yield p
+
+
+def references_between(skills) -> dict:
+    """{skill: other ENABLED shrix skills it names — as a `/name` command (after a
+    space, a backtick, `(`, `[` or `*`, never inside a path, a quote or a
+    template), as the `name` skill, as a path into skills/<name>, as a
+    relative ../<name> path, or as "skills" / "<name>" path parts}. A
+    `../<name>` that resolves inside the skill itself is reported too — a
+    false alarm in the safe direction, since the check is report-only."""
+    names = sorted({d for d, off, _ in skills if not off}, key=len, reverse=True)
+    if not names:
+        return {}
+    alt = "|".join(re.escape(n) for n in names)
+    patterns = [
+        re.compile(r'(?:^|(?<=[\s`(\[*]))/(' + alt + r')(?![\w/-]|\.\w)', re.M),
+        re.compile(r'`(' + alt + r')` skill\b'),
+        re.compile(r'(?:\.agents|\.claude)/skills/(' + alt + r')(?![\w-]|\.\w)'),
+        re.compile(r'(?:^|(?<=[\s`(\["\'/]))\.\./(' + alt + r')(?![\w.-])', re.M),
+        re.compile(r'"skills"\s*/\s*"(' + alt + r')"'),
+    ]
+    found = {}
+    for dirname, is_disabled, skill_md in skills:
+        if is_disabled:
+            continue
+        refs = set()
+        for f in skill_text_files(skill_md.parent):
+            try:
+                text = f.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            for pattern in patterns:
+                refs.update(m.group(1) for m in pattern.finditer(text))
+        refs.discard(dirname)
+        found[dirname] = refs
+    return found
+
+
+def check_bundles(skills):
+    """(outside, unknown) — references outside every bundle and not a listed
+    mention, and § Bundles names that are no shrix skill; None if no § Bundles."""
+    parsed = parse_bundles(CONVENTIONS)
+    if parsed is None:
+        return None
+    bundles, mentions = parsed
+    known = {d for d, _, _ in skills}
+    listed = {n for b in bundles for n in b} | set(mentions) | {n for v in mentions.values() for n in v}
+    outside = []
+    for src, refs in sorted(references_between(skills).items()):
+        for dst in sorted(refs):
+            if any(src in b and dst in b for b in bundles) or dst in mentions.get(src, ()):
+                continue
+            outside.append((src, dst))
+    return outside, sorted(listed - known)
+
+
 # ---------------------------------------------------------------------------
 # Fix
 # ---------------------------------------------------------------------------
 
-def fix_skill(dirname: str, skill_md: Path, issues: list[str]):
-    """Repair the issues reported for a single NEEDS-FIX skill."""
+def fix_skill(dirname: str, skill_md: Path, issues: list[str]) -> bool:
+    """Repair the issues reported for a single NEEDS-FIX skill.
+    Returns False when any repair could not land (collision, read/write error)."""
     plain = plain_name(dirname)
+    landed = True
 
     # --- 1. Symlink ----------------------------------------------------------
     if any("symlink" in i or "missing symlink" in i for i in issues):
@@ -189,24 +352,25 @@ def fix_skill(dirname: str, skill_md: Path, issues: list[str]):
             print(f"    [symlink] COLLISION: ~/.claude/skills/{plain} is a real skill dir "
                   f"(another installed skill owns this name) — not touching it. "
                   f"Rename one of the two, then re-run --fix.")
+            landed = False
 
     # --- 2-4. Frontmatter ----------------------------------------------------
     fm_issues = [i for i in issues if "symlink" not in i and "missing symlink" not in i]
     if not fm_issues:
-        return
+        return landed
 
     try:
         text = skill_md.read_text(encoding="utf-8")
     except OSError as e:
         print(f"    [error] cannot read {skill_md}: {e}")
-        return
+        return False
 
     lines = text.splitlines(keepends=True)
 
     # Locate frontmatter block
     if not lines or lines[0].strip() != "---":
         print(f"    [skip] {skill_md.name} has no frontmatter — cannot repair")
-        return
+        return False
 
     fm_end = None
     for i in range(1, len(lines)):
@@ -216,7 +380,7 @@ def fix_skill(dirname: str, skill_md: Path, issues: list[str]):
 
     if fm_end is None:
         print(f"    [skip] {skill_md.name} frontmatter not closed — cannot repair")
-        return
+        return False
 
     fm_lines = list(lines[1:fm_end])
 
@@ -264,8 +428,28 @@ def fix_skill(dirname: str, skill_md: Path, issues: list[str]):
     if any("description" in i for i in fm_issues):
         new_fm       = []
         fixed_desc   = False
+        in_block     = False
+        empty_block  = False
         for l in fm_lines:
+            if in_block and l.strip() and not l[:1].isspace():
+                # the block ended with no text line — nothing to prefix; say so
+                print("    [desc] the description block is empty — add its text by hand")
+                landed = False
+                empty_block = True
+                in_block = False                 # this line is the next key: handle it below
+            if in_block:
+                # `description: >-` — prefix the block's first text line, keep its indent
+                if l.strip():
+                    if not l.strip().startswith("(shrix)"):
+                        l = re.sub(r'^(\s+)', r'\1(shrix) ', l, count=1)
+                    in_block = False
+                new_fm.append(l)
+                continue
             m = re.match(r'^(description:\s*)(.*)', l, re.DOTALL)
+            if m and BLOCK_HEADER.match(m.group(2).strip()):
+                new_fm.append(l)
+                in_block = fixed_desc = True
+                continue
             if m:
                 prefix, rest = m.group(1), m.group(2).rstrip("\n")
                 # Strip surrounding quotes if present
@@ -278,6 +462,10 @@ def fix_skill(dirname: str, skill_md: Path, issues: list[str]):
                 fixed_desc = True
             else:
                 new_fm.append(l)
+        if in_block:                             # the block was the last frontmatter line
+            print("    [desc] the description block is empty — add its text by hand")
+            landed = False
+            empty_block = True
         if not fixed_desc:
             # No description field found — add a minimal one after author
             inserted = False
@@ -291,7 +479,8 @@ def fix_skill(dirname: str, skill_md: Path, issues: list[str]):
                 newer.append("description: (shrix) \n")
             new_fm = newer
         fm_lines = new_fm
-        print("    [desc] added (shrix) prefix to description")
+        if not empty_block:
+            print("    [desc] added (shrix) prefix to description")
 
     # Reconstruct and write
     new_text = "".join(["---\n"] + fm_lines + [lines[fm_end]] + lines[fm_end + 1:])
@@ -299,6 +488,8 @@ def fix_skill(dirname: str, skill_md: Path, issues: list[str]):
         skill_md.write_text(new_text, encoding="utf-8")
     except OSError as e:
         print(f"    [error] cannot write {skill_md}: {e}")
+        return False
+    return landed
 
 
 # ---------------------------------------------------------------------------
@@ -322,12 +513,11 @@ def add_skill(name: str) -> int:
     if not skill_md.exists():
         disabled_md = SKILLS_DISABLED / dirname / "SKILL.md"
         if disabled_md.exists():
-            print(f"ERROR: '{dirname}' is DISABLED (in ~/.agents/disabled-skills/).")
-            print(f"  Move it to ~/.agents/skills/ first:")
-            print(f"    mv ~/.agents/disabled-skills/{dirname} ~/.agents/skills/")
-            print(f"  Then re-run: skillsync.py add {name}")
+            status("fail", f"'{dirname}' is disabled — move it first: "
+                           f"mv ~/.agents/disabled-skills/{dirname} ~/.agents/skills/ · "
+                           f"then skillsync.py add {name}")
             return 1
-        print(f"ERROR: No skill dir with SKILL.md at ~/.agents/skills/{dirname}/")
+        status("fail", f"no skill dir with SKILL.md at ~/.agents/skills/{dirname}/")
         return 1
 
     plain  = plain_name(dirname)
@@ -341,7 +531,8 @@ def add_skill(name: str) -> int:
         print("  [name]    already correct")
         print("  [author]  already set")
         print("  [desc]    already prefixed")
-        print(f"\n  → /{plain}  (already compliant — nothing changed)")
+        print()
+        status("warn", f"/{plain} already compliant — nothing changed")
         return 0
 
     # If symlink is already correct, note it (fix_skill won't print anything for it)
@@ -350,9 +541,13 @@ def add_skill(name: str) -> int:
         print(f"  [symlink] already linked  (~/.claude/skills/{plain} -> {expected_target})")
 
     # Delegate all repairs to the existing fix routine (DRY)
-    fix_skill(dirname, skill_md, issues)
+    if not fix_skill(dirname, skill_md, issues):
+        print()
+        status("fail", f"/{plain} not fully onboarded — see the lines above")
+        return 1
 
-    print(f"\n  → /{plain}")
+    print()
+    status("ok", f"onboarded → /{plain}")
     return 0
 
 
@@ -371,8 +566,7 @@ def main() -> int:
     # ---- add <name> subcommand ----------------------------------------------
     if args and args[0] == "add":
         if len(args) < 2:
-            print("Usage: skillsync.py add <name>")
-            print("  <name> is the plain skill name (e.g. foo)")
+            status("fail", "usage: skillsync.py add <name>  (the plain skill name, e.g. foo)")
             return 1
         return add_skill(args[1])
 
@@ -380,8 +574,9 @@ def main() -> int:
     ok_skills       = []   # (dirname, plain)
     needs_fix       = []   # (dirname, plain, issues, skill_md)
     disabled_skills = []   # (dirname, plain, issues)
+    all_skills      = list(get_user_skill_dirs())
 
-    for dirname, is_disabled, skill_md in get_user_skill_dirs():
+    for dirname, is_disabled, skill_md in all_skills:
         plain  = plain_name(dirname)
         issues = check_skill(dirname, is_disabled, skill_md)
 
@@ -422,19 +617,39 @@ def main() -> int:
         for name, target, reason in orphans:
             print(f"  ~/.claude/skills/{name}  ->  {target}   [{reason}]")
 
+    bundle_check = check_bundles(all_skills)
+    if bundle_check is None:
+        print("\nWARN — no § Bundles in CONVENTIONS.md — bundle check skipped")
+    else:
+        outside, unknown = bundle_check
+        if outside:
+            print(f"\nWARN — references outside a bundle ({len(outside)}) — put the pair in one bundle "
+                  "in CONVENTIONS.md § Bundles, or list it as a mention:")
+            for src, dst in outside:
+                print(f"  {src} → /{dst}")
+        if unknown:
+            print(f"\nWARN — named in CONVENTIONS.md § Bundles but not a shrix skill: {', '.join(unknown)}")
+
     if not ok_skills and not needs_fix and not disabled_skills:
         print("\n(no shrix skills found)")
 
     # ---- Fix ----------------------------------------------------------------
     if fix_mode:
         if not needs_fix:
-            print("\n[fix] Nothing to fix — all enabled skills are OK.")
+            print()
+            status("warn", "nothing to fix — all enabled skills are OK")
         else:
             print(f"\n--- FIX MODE ({len(needs_fix)} skill(s)) ---")
+            failed = []
             for dirname, plain, issues, skill_md in needs_fix:
                 print(f"  Fixing {plain} ({dirname})...")
-                fix_skill(dirname, skill_md, issues)
-            print("\nDone. Re-run without --fix to verify.")
+                if not fix_skill(dirname, skill_md, issues):
+                    failed.append(plain)
+            print()
+            if failed:
+                status("fail", f"{len(failed)} skill(s) could not be fully fixed: {', '.join(failed)}")
+                return 1
+            status("ok", f"fixed {len(needs_fix)} skill(s) — re-run without --fix to verify")
 
     return 0
 

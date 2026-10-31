@@ -1,7 +1,7 @@
 # clodex help block
 
 Used by: SKILL.md when the user invokes clodex without a query (e.g., `/clodex`,
-`/clodex --help`, "how do I use clodex"). Read this file and show its contents
+`/clodex --help`). Read this file and show its contents
 verbatim to the user, formatted as below.
 
 ---
@@ -15,9 +15,13 @@ USAGE
   /clodex --effort L <query>                      L = low|medium|high|xhigh
   /clodex --no-revise <query>                     skip Step 2.6 self-revision (saves 30s–2min)
   /clodex --rounds N --effort L <query>           combine flags
+  /clodex --panel <query>                         PANEL MODE (below): several different models
+  /clodex --panel                                 panel on a query inferred from the conversation
+  /clodex --panel --pick                          panel, agents picked in a widget
+  /clodex --panel --agents <a>, <b>, <c> <query>  panel with an explicit agent set
   /clodex --help                                  show this help
 
-  Natural language (any message containing "clodex"):
+  Natural language (an explicit request using "clodex" as an action):
     "have clodex weigh in on X"
     "review the auth code over clodex"
     "clodex this design with 5 rounds"
@@ -38,6 +42,11 @@ FLAGS
                Use when wall-clock matters more than answer quality on contested
                questions.
 
+PANEL MODE (--panel, or "run a panel on X", "get a multi-model review of X")
+  Several DIFFERENT models answer independently, critique once, and a neutral
+  judge rules on evidence (it runs the tests for code). Same-model panels are
+  refused; no rounds, no revision. Procedure: references/panel.md
+
 EXAMPLES
   /clodex Should I use Pydantic v2 or attrs for this data model?
   /clodex --rounds 5 Architectural review: Kafka or NATS for our event bus?
@@ -47,7 +56,7 @@ EXAMPLES
 
 WHEN TO USE
   Hard architectural questions, library/framework choices, design tradeoffs,
-  debugging strategies — anything where a 5–35 min adversarial second opinion
+  debugging strategies — anything where a 6–38 min adversarial second opinion
   is worth the wall-clock cost.
 
 WHEN NOT TO USE

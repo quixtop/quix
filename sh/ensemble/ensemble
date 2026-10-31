@@ -1,0 +1,213 @@
+#!/usr/bin/env python3
+# (c) Shrix
+# author: shrix
+# ensemble — the Ensemble's ledger for the project you are in: every task by FEATURE, so a feature's
+# rows are its bucket (~/.claude/rules-ref/sessions.md § The ledger). The leader writes; anyone reads.
+# The file is <git dir>/ensemble/ledger.jsonl — one JSON row per task, never committed.
+#
+# Usage:
+#   ensemble add --feature <area:topic> --task "<what>" [--worker 001] [--origin 000]
+#                [--state queued|running] [--paths a,b] [--spec <path>] [--session <id>]
+#   ensemble set <id> [--state queued|running|ready|shipped|held] [--worker 001] [--shas a,b]
+#                [--summary "<1-3 lines>"] [--paths a,b] [--spec <path>] [--session <id>]
+#   ensemble show [--all] [--json]        open rows (not shipped); --all every row
+#   ensemble bucket <feature> [--json]    one feature's rows; an area alone (auth) takes all its features
+#   ensemble since <iso> [--json]         rows updated at or after the time (the /push chatlog)
+#   ensemble path                         the ledger file's path
+#   ensemble -h | --help | help
+import atexit, fcntl, json, os, re, subprocess, sys, tempfile
+from datetime import datetime, timezone
+
+atexit.register(lambda: sys.stdout.isatty() and print())
+TTY = sys.stdout.isatty()
+STATES = ("queued", "running", "ready", "shipped", "held")
+FEATURE = re.compile(r"^[a-z0-9][a-z0-9-]*:[a-z0-9][a-z0-9-]*$")
+SESSION_NO = re.compile(r"^\d{3}$")
+
+
+def status(kind, msg):
+    glyph, colour = {"ok": ("✓", "32"), "fail": ("✗", "31"), "warn": ("⚠", "33")}[kind]
+    print(f"\033[{colour}m{glyph} {msg}\033[0m" if TTY else f"{glyph} {msg}")
+
+
+def die(msg, code=2):
+    status("fail", msg)
+    sys.exit(code)
+
+
+def usage():
+    with open(__file__) as f:
+        for i, line in enumerate(f):
+            if i == 0 or line.startswith("# (c)") or line.startswith("# author:"):
+                continue
+            if not line.startswith("#"):
+                break
+            print(line[2:].rstrip() if line.startswith("# ") else line[1:].rstrip())
+
+
+def ledger_path():
+    try:
+        p = subprocess.run(["git", "rev-parse", "--git-path", "ensemble/ledger.jsonl"], capture_output=True, text=True, check=True).stdout.strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        die("not in a git repo — the Ensemble needs one", 1)
+    return os.path.abspath(p)
+
+
+def now():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def read_rows(path):
+    if not os.path.exists(path):
+        return []
+    rows = []
+    with open(path) as f:
+        for n, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                die(f"the ledger's line {n} is not JSON — fix or remove it: {path}", 1)
+    return rows
+
+
+def write_rows(path, rows):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".ledger.")
+    with os.fdopen(fd, "w") as f:
+        for r in rows:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    os.replace(tmp, path)   # atomic: a reader sees the old file or the new one, never half
+
+
+def locked(path):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    lk = open(path + ".lock", "w")
+    fcntl.flock(lk, fcntl.LOCK_EX)
+    return lk
+
+
+def opts(args, allowed):
+    out, i = {}, 0
+    while i < len(args):
+        a = args[i]
+        if not a.startswith("--") or a[2:] not in allowed:
+            die(f"unknown option {a} — see ensemble -h")
+        if allowed[a[2:]] is bool:
+            out[a[2:]] = True; i += 1; continue
+        if i + 1 >= len(args):
+            die(f"{a} needs a value")
+        out[a[2:]] = args[i + 1]; i += 2
+    return out
+
+
+def listed(v):
+    return [x.strip() for x in v.split(",") if x.strip()]
+
+
+def check(o):
+    if "feature" in o and not FEATURE.match(o["feature"]):
+        die(f"feature must be area:topic in lowercase — got {o['feature']!r}")
+    if "state" in o and o["state"] not in STATES:
+        die(f"state must be one of {', '.join(STATES)}")
+    for k in ("worker", "origin"):
+        if k in o and not SESSION_NO.match(o[k]):
+            die(f"--{k} is a session number like 001")
+    if "summary" in o and len(o["summary"]) > 600:
+        die("summary: one to three lines, at most 600 characters")
+
+
+def cmd_add(args):
+    o = opts(args, {k: str for k in ("feature", "task", "worker", "origin", "state", "paths", "spec", "session")})
+    if "feature" not in o or "task" not in o:
+        die("add needs --feature and --task")
+    check(o)
+    path = ledger_path()
+    with locked(path):
+        rows = read_rows(path)
+        day = datetime.now(timezone.utc).strftime("%y%m%d")
+        n = 1 + sum(1 for r in rows if r.get("id", "").startswith(f"t{day}-"))
+        t = now()
+        row = {"id": f"t{day}-{n:02d}", "feature": o["feature"], "task": o["task"], "origin": o.get("origin", "000"),
+               "worker": o.get("worker"), "state": o.get("state", "running" if o.get("worker") else "queued"),
+               "started": t, "updated": t, "paths": listed(o.get("paths", "")), "shas": [], "spec": o.get("spec"),
+               "session": o.get("session"), "summary": ""}
+        rows.append(row)
+        write_rows(path, rows)
+    status("ok", f"{row['id']} {row['feature']} — {row['state']}{' on ' + row['worker'] if row['worker'] else ''}")
+
+
+def cmd_set(args):
+    if not args or args[0].startswith("--"):
+        die("set needs a task id — ensemble show lists them")
+    rid, o = args[0], opts(args[1:], {k: str for k in ("state", "worker", "shas", "summary", "paths", "spec", "session")})
+    if not o:
+        die("set needs at least one change")
+    check(o)
+    path = ledger_path()
+    with locked(path):
+        rows = read_rows(path)
+        hit = next((r for r in rows if r.get("id") == rid), None)
+        if not hit:
+            die(f"no task {rid} in the ledger", 1)
+        for k, v in o.items():
+            if k == "shas":
+                hit["shas"] = list(dict.fromkeys(hit.get("shas", []) + listed(v)))
+            elif k == "paths":
+                hit["paths"] = list(dict.fromkeys(hit.get("paths", []) + listed(v)))
+            else:
+                hit[k] = v
+        hit["updated"] = now()
+        write_rows(path, rows)
+    status("ok", f"{rid} {hit['feature']} — {hit['state']}")
+
+
+def table(rows, as_json):
+    if as_json:
+        print(json.dumps(rows, ensure_ascii=False, indent=2))
+        return
+    if not rows:
+        print("(no rows)")
+        return
+    for r in rows:
+        who = r.get("worker") or "—"
+        print(f"{r['id']}  {r['state']:<8} {who:<4} {r['feature']:<24} {r['task']}")
+        if r.get("summary"):
+            print(f"{'':16}{r['summary']}")
+
+
+def main():
+    a = sys.argv[1:]
+    if not a or a[0] in ("-h", "--help", "help"):
+        usage(); sys.exit(0)
+    cmd, rest = a[0], a[1:]
+    if cmd == "add":
+        cmd_add(rest)
+    elif cmd == "set":
+        cmd_set(rest)
+    elif cmd == "path":
+        print(ledger_path())
+    elif cmd in ("show", "bucket", "since"):
+        as_json = "--json" in rest
+        rest = [x for x in rest if x != "--json"]
+        rows = read_rows(ledger_path())
+        if cmd == "show":
+            rows = rows if "--all" in rest else [r for r in rows if r.get("state") != "shipped"]
+        elif cmd == "bucket":
+            if not rest:
+                die("bucket needs a feature (area:topic) or an area")
+            key = rest[0]
+            rows = [r for r in rows if r.get("feature") == key or r.get("feature", "").split(":")[0] == key]
+        else:
+            if not rest:
+                die("since needs a time, e.g. 2026-10-29T00:00:00Z")
+            rows = [r for r in rows if r.get("updated", "") >= rest[0]]
+        table(rows, as_json)
+    else:
+        die(f"unknown command {cmd} — see ensemble -h")
+
+
+if __name__ == "__main__":
+    main()

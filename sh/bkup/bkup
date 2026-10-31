@@ -1,0 +1,217 @@
+#!/usr/bin/env bash
+# (c) Shrix
+# author: shrix
+# bkup — copy a folder into a backup folder: new and changed files only; nothing is deleted unless you approve.
+#
+# The source is only ever read. Old versions of changed files are kept in
+# <dest>/.deleted/<date>. Files that are gone from the source stay in the backup
+# until you approve moving them to <dest>/.deleted/<date>; .deleted itself is
+# emptied only by `purge`, after a y/N. Both questions need you at the keyboard.
+#
+# Usage:
+#   bkup nvme ssd                     /Volumes/NVMe2TB/shrix → /Volumes/SSD2TB/nvme-shrix-bkup
+#   bkup ssd nvme                     /Volumes/SSD2TB/shrix  → /Volumes/NVMe2TB/ssd-shrix-bkup
+#   bkup <source> <dest>              any folder → any folder (never one inside the other)
+#   bkup <…> -a | --approve | approve list files gone from the source; on y, move them to .deleted
+#   bkup <…> -p | --purge | purge     show what .deleted holds; on y, empty it
+#   bkup -h | --help | help
+#
+# A destination under /Volumes/<drive> is refused unless that drive is mounted.
+# Needs Homebrew rsync (/opt/homebrew/bin/rsync); macOS's openrsync lacks options used here.
+# Log: ~/Library/Logs/bkup.log
+# Exit: 0 done (✓, or ⚠ when something needs your attention) · 1 failed, refused or partial (✗ / ⚠)
+set -uo pipefail
+
+RSYNC=/opt/homebrew/bin/rsync
+NVME_SRC=/Volumes/NVMe2TB/shrix
+SSD_SRC=/Volumes/SSD2TB/shrix
+NVME_TO_SSD=/Volumes/SSD2TB/nvme-shrix-bkup
+SSD_TO_NVME=/Volumes/NVMe2TB/ssd-shrix-bkup
+LOG="$HOME/Library/Logs/bkup.log"
+LOCK=""
+
+_gap() { [ -t 1 ] && printf '\n'; return 0; }
+release_lock() { [ -n "$LOCK" ] && rm -rf -- "$LOCK" 2>/dev/null; LOCK=""; return 0; }
+trap 'release_lock; _gap' EXIT
+
+# shellcheck source=/dev/null
+[ -r "$HOME/.local/bin/proj-env.sh" ] && source "$HOME/.local/bin/proj-env.sh"
+if ! declare -F status >/dev/null; then
+  status() {
+    local g='' y='' r='' n=''
+    [ -t 1 ] && { g='\033[0;32m'; y='\033[1;33m'; r='\033[0;31m'; n='\033[0m'; }
+    case "$1" in
+      ok)   printf "${g}✓ %s${n}\n" "$2" ;;
+      warn) printf "${y}⚠ %s${n}\n" "$2" ;;
+      *)    printf "${r}✗ %s${n}\n" "$2" >&2 ;;
+    esac
+  }
+fi
+
+usage() {
+  awk 'NR==1 { next } /^# \(c\)/ { next } /^# author:/ { next } /^#/ { sub(/^# ?/,""); print; next } { exit }' "$0"
+}
+
+log() { { mkdir -p "$(dirname "$LOG")" && printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOG"; } 2>/dev/null || true; }
+
+# Absolute physical path, also for a path that does not exist yet: the deepest
+# existing folder is resolved with /bin/pwd -P (canonical case, symlinks
+# followed) and the missing tail is kept as typed.
+phys() {
+  local p=$1 tail="" base
+  case $p in /*) ;; *) p="$PWD/$p" ;; esac
+  while [ ! -d "$p" ]; do tail="/${p##*/}$tail"; p=$(dirname "$p"); done
+  base=$(cd "$p" && /bin/pwd -P) || return 1
+  [ "$base" = / ] && base=""
+  printf '%s\n' "${base}${tail:-}" | sed 's|^$|/|'
+}
+
+# A path under /Volumes/<drive>/… is only usable while <drive> is mounted;
+# otherwise mkdir would quietly create it on the internal disk instead.
+volume_ok() {
+  case "$1" in
+    /Volumes/*)
+      local rest="${1#/Volumes/}" vol
+      vol="/Volumes/${rest%%/*}"
+      /sbin/mount | grep -Fq " on $vol (" ;;
+    *) return 0 ;;
+  esac
+}
+
+mode=copy
+args=()
+for a in "$@"; do
+  case "$a" in
+    -h|--help|help) [ $# -eq 1 ] && { usage; exit 0; }; args+=("$a") ;;
+    -a|--approve|approve) mode=approve ;;
+    -p|--purge|purge) mode=purge ;;
+    *) args+=("$a") ;;
+  esac
+done
+
+if [ ${#args[@]} -ne 2 ]; then
+  status fail "need a source and a destination — bkup -h"
+  exit 1
+fi
+src="${args[0]}" dest="${args[1]}"
+if [ "$src" = nvme ] && [ "$dest" = ssd ]; then
+  src=$NVME_SRC dest=$NVME_TO_SSD
+elif [ "$src" = ssd ] && [ "$dest" = nvme ]; then
+  src=$SSD_SRC dest=$SSD_TO_NVME
+else
+  for w in "$src" "$dest"; do
+    case "$w" in nvme|ssd)
+      status fail "use both shortcuts (bkup nvme ssd · bkup ssd nvme) or two paths"
+      exit 1 ;;
+    esac
+  done
+fi
+again=$(printf '%q ' "${args[@]}")     # the command line to suggest back, safely quoted
+
+[ -x "$RSYNC" ] || { status fail "Homebrew rsync not found at $RSYNC — brew install rsync"; exit 1; }
+src=$(phys "${src%/}") && dest=$(phys "${dest%/}") || { status fail "cannot resolve the paths"; exit 1; }
+volume_ok "$dest" || { status fail "destination drive not mounted: $dest"; exit 1; }
+if [ "$mode" != purge ]; then
+  volume_ok "$src" && [ -d "$src" ] || { status fail "source not found (drive not mounted?): $src"; exit 1; }
+  case "$dest/" in "$src/"*) status fail "the backup cannot be inside the source: $dest"; exit 1 ;; esac
+  case "$src/" in "$dest/"*) status fail "the source cannot be inside the backup: $src"; exit 1 ;; esac
+fi
+
+# Interactive modes need a person: refuse up front, before listing anything.
+if [ "$mode" != copy ] && [ ! -t 0 ]; then
+  status fail "$mode needs you at the keyboard — run it in a terminal"
+  exit 1
+fi
+
+# One run per backup folder at a time (a purge must never race a copy).
+take_lock() {
+  local l="$dest/.bkup.lock"
+  if mkdir "$l" 2>/dev/null; then echo $$ > "$l/pid"; LOCK=$l; return 0; fi
+  local other; other=$(cat "$l/pid" 2>/dev/null)
+  if [ -n "$other" ] && kill -0 "$other" 2>/dev/null; then
+    status fail "another bkup (pid $other) is using $dest — try again when it finishes"; exit 1
+  fi
+  rm -rf -- "$l" && mkdir "$l" 2>/dev/null && echo $$ > "$l/pid" && LOCK=$l && return 0   # stale lock
+  status fail "cannot lock $dest"; exit 1
+}
+
+COMMON=(-aH --xattrs --exclude=.DS_Store --exclude=/.deleted/ --exclude=/.bkup.lock/)
+ts=$(date +%Y-%m-%d_%H%M%S)
+[ -e "$dest/.deleted/$ts" ] && ts="${ts}_$$"
+
+# Files present in the backup but no longer in the source (dry run, changes
+# nothing). Returns rsync's exit code, so a read error is never mistaken for "none".
+gone_list() {
+  "$RSYNC" "${COMMON[@]}" -n --delete --itemize-changes "$src/" "$dest/" 2>/dev/null \
+    | sed -n 's/^\*deleting   //p'
+}
+
+case "$mode" in
+  purge)
+    if [ ! -d "$dest/.deleted" ]; then status warn "nothing to purge — $dest/.deleted does not exist"; exit 0; fi
+    take_lock
+    du -sh "$dest/.deleted"
+    find "$dest/.deleted" -mindepth 1 -maxdepth 1 -print0 | xargs -0 du -sh
+    read -r -p "Permanently delete everything in $dest/.deleted? [y/N] " reply
+    case "$reply" in y|Y) ;; *) status warn "kept — nothing deleted"; exit 0 ;; esac
+    rm -rf -- "${dest:?}/.deleted" || { status fail "could not empty $dest/.deleted"; log "PURGE FAILED $dest"; exit 1; }
+    log "purged $dest/.deleted"
+    status ok "emptied $dest/.deleted"
+    exit 0 ;;
+  approve)
+    [ -d "$dest" ] || { status warn "no backup yet at $dest — nothing to approve"; exit 0; }
+    take_lock
+    list=$(gone_list); grc=$?
+    if [ $grc -ne 0 ] && [ $grc -ne 24 ]; then
+      status fail "could not list the gone files (rsync exit $grc) — is part of the source unreadable?"; exit 1
+    fi
+    n=$(printf '%s' "$list" | grep -c . || true)
+    if [ "$n" -eq 0 ]; then status ok "nothing to approve — every file in the backup still exists in $src"; exit 0; fi
+    printf '%s\n' "$list" | head -40
+    [ "$n" -gt 40 ] && echo "… and $((n - 40)) more"
+    read -r -p "Move these $n item(s) out of the backup into $dest/.deleted/$ts? [y/N] " reply
+    case "$reply" in y|Y) ;; *) status warn "kept — nothing moved"; exit 0 ;; esac
+    if [ "$(gone_list)" != "$list" ]; then
+      status fail "the source changed since the listing — nothing moved; run approve again"; exit 1
+    fi
+    "$RSYNC" "${COMMON[@]}" --delete --backup --backup-dir="$dest/.deleted/$ts" "$src/" "$dest/"
+    rc=$?
+    if [ $rc -ne 0 ] && [ $rc -ne 24 ]; then status fail "rsync failed (exit $rc)"; log "APPROVE FAILED rc=$rc $src -> $dest"; exit 1; fi
+    log "approved $n item(s) -> $dest/.deleted/$ts"
+    status ok "moved $n item(s) to $dest/.deleted/$ts — bkup ${again}purge shows what .deleted holds"
+    exit 0 ;;
+esac
+
+# copy: new and changed files only; replaced versions go to .deleted/<ts>; nothing removed
+mkdir -p "$dest" || { status fail "cannot create $dest"; exit 1; }
+take_lock
+if [ -t 1 ]; then progress=(--info=progress2,stats1 --human-readable); else progress=(--info=stats1 --human-readable); fi
+"$RSYNC" "${COMMON[@]}" --backup --backup-dir="$dest/.deleted/$ts" "${progress[@]}" "$src/" "$dest/"
+rc=$?
+case $rc in
+  0|24) ;;
+  23) status warn "some files could not be copied (rsync exit 23) — see the errors above"
+      log "PARTIAL rc=23 $src -> $dest"; exit 1 ;;
+  *)  status fail "rsync failed (exit $rc)"; log "FAILED rc=$rc $src -> $dest"; exit 1 ;;
+esac
+
+list=$(gone_list); grc=$?
+held=""
+[ -d "$dest/.deleted" ] && held=$(du -sh "$dest/.deleted" 2>/dev/null | cut -f1)
+note=""
+[ -n "$held" ] && note=" · .deleted holds $held (bkup ${again}purge)"
+if [ $grc -ne 0 ] && [ $grc -ne 24 ]; then
+  log "copied $src -> $dest rc=$rc; gone-check FAILED grc=$grc"
+  status warn "copied $src → $dest, but could not check for gone files (rsync exit $grc)$note"
+  exit 1
+fi
+n=$(printf '%s' "$list" | grep -c . || true)
+log "copied $src -> $dest rc=$rc gone=$n deleted-folder=${held:-0}"
+if [ "$n" -gt 0 ]; then
+  status warn "copied $src → $dest · $n item(s) gone from the source are still in the backup — bkup ${again}approve$note"
+elif [ $rc -eq 24 ]; then
+  status warn "copied $src → $dest, but some files changed while copying — run it again$note"
+else
+  status ok "copied $src → $dest$note"
+fi
+exit 0

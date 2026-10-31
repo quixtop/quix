@@ -1,6 +1,6 @@
 # Python Test Examples (pytest)
 
-Comprehensive pytest patterns including fixtures, mocking, and test structure.
+pytest patterns: test structure, fixtures, mocking, coverage.
 
 ---
 
@@ -64,10 +64,7 @@ pytest tests/test_module.py::test_function
 ## Coverage Analysis
 
 ```bash
-# Count functions
-grep -r "^def " src/ --include="*.py" | wc -l
-grep -r "^def test_" tests/ --include="*.py" | wc -l
-
+# Counts: SKILL.md § Analyze Mode, Step 2
 # Coverage report
 pytest --cov=src --cov-report=term-missing
 ```

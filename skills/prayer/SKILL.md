@@ -1,7 +1,7 @@
 ---
 name: prayer
 author: shrix
-description: "(shrix) Re-read every rule in ~/.claude/rules/ and ~/.claude/CLAUDE.md in full and comply with all of them strictly from this turn onward — picking up any rule edits made since the session started. Forward-acting only: never audits, never grades past turns, never summarises or reprints the rules. Use after a compaction, when a session has drifted, before risky or long unattended work, or on /prayer, 'follow the rules', 'comply', 'stay on the rails'."
+description: "(shrix) Re-read every rule in ~/.claude/rules/ and ~/.claude/CLAUDE.md in full and follow them strictly from this turn on, picking up edits made since the session started. Forward-acting only — never audits past turns or reprints the rules. Use when a session has drifted, before risky or long unattended work, or on /prayer, 'follow the rules', 'comply', 'stay on the rails'."
 metadata:
   version: "6.0"
   category: discipline
@@ -20,7 +20,6 @@ Comply with the rules. Strictly, from here on.
 ## Constraints
 
 - Read the files themselves; never summarise them and never reprint them.
-- Read every file, not a selection.
 - This file names no rule and quotes no rule — rules change, and anything
   restated here would go stale.
 - Forward only: no auditing, scoring, or reporting what was missed earlier.

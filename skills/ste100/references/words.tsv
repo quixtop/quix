@@ -1,0 +1,111 @@
+# (c) Shrix
+# author: shrix
+# Words and phrases to replace — our own plain-language list, NOT the ASD-STE100
+# dictionary (which is copyrighted and never shipped here). Every single-word entry
+# was checked against Issue 9 (January 2025): each is unapproved there or absent,
+# and each suggested replacement's first word is an approved STE word.
+# Columns: word-or-phrase <TAB> part of speech <TAB> use instead [<TAB> cs].
+# "phrasal" rows are phrasal verbs (rule 9.3); verbs also match -s/-ed/-ing forms.
+# "cs" matches case-sensitively (so "may" never hits the month "May").
+# Nouns that software docs use as technical nouns (request, component) are left
+# out on purpose: name them in the project's own dictionary instead.
+accomplish	v	do
+additional	adj	more
+advise	v	tell
+aforementioned	adj	this
+allocate	v	give
+alternatively	adv	or
+anticipate	v	think that
+apparent	adj	clear
+appropriate	adj	correct
+ascertain	v	find
+assist	v	help
+attempt	v	try
+commence	v	start
+comprise	v	contain
+concerning	prep	about
+consequently	adv	as a result
+constitute	v	be
+demonstrate	v	show
+determine	v	find
+disseminate	v	send
+eliminate	v	remove
+employ	v	use
+endeavor	v	try
+ensure	v	make sure
+evident	adj	clear
+facilitate	v	help
+frequently	adv	many times
+furthermore	adv	also
+identical	adj	same
+indicate	v	show
+initiate	v	start
+leverage	v	use
+locate	v	find
+maintain	v	keep
+methodology	n	method
+minimize	v	decrease
+modify	v	change
+necessitate	v	make necessary
+notify	v	tell
+numerous	adj	many
+obtain	v	get
+perform	v	do
+permit	v	let
+portion	n	part
+possess	v	have
+preclude	v	prevent
+proceed	v	continue
+procure	v	get
+provide	v	give
+purchase	v	get
+regarding	prep	about
+reiterate	v	tell again
+remainder	n	remaining part
+purge	v	remove
+require	v	must
+reside	v	be
+retain	v	keep
+should	v	must
+may	v	can	cs
+might	v	can
+shall	v	must
+would	v	will
+subsequent	adj	next
+subsequently	adv	then
+terminate	v	stop
+therefore	adv	thus
+thereby	adv	thus
+utilize	v	use
+utilization	n	use
+via	prep	through
+whereas	conj	but
+prior to	phrase	before
+in order to	phrase	to
+due to the fact that	phrase	because
+in the event that	phrase	if
+in the event of	phrase	if there is
+in case of	phrase	if there is
+in addition	phrase	also
+in an effort to	phrase	to
+in accordance with	phrase	as given in
+in the vicinity of	phrase	near
+in excess of	phrase	more than
+a number of	phrase	some
+the majority of	phrase	most
+at this point in time	phrase	at this time
+is able to	phrase	can
+are able to	phrase	can
+make use of	phrase	use
+with regard to	phrase	about
+with respect to	phrase	about
+for the purpose of	phrase	to
+take into account	phrase	think about
+carry out	phrasal	do
+find out	phrasal	find
+figure out	phrasal	find
+look into	phrasal	examine
+get rid of	phrasal	remove
+come up with	phrasal	make
+point out	phrasal	show
+end up	phrasal	become

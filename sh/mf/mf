@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# (c) Shrix
+# author: shrix
+# mf — Spotlight search from the terminal (mdfind), the first 50 results by default.
+#
+# Usage:
+#   mf <query>                      first 50 matches
+#   mf -n | --limit <N> <query>     first N matches
+#   mf -a | --all <query>           every match
+#   mf -h | --help | help
+#
+# Words after the options form one query: mf anthropic claude = mf 'anthropic claude'.
+# Examples:
+#   mf 'anthropic | claude'
+#   mf -n 20 'pdf documents'
+#   mf -a 'important files'
+set -uo pipefail
+
+_gap() { [ -t 1 ] && printf '\n'; return 0; }
+trap _gap EXIT
+
+usage() {
+  awk 'NR==1 { next } /^# \(c\)/ { next } /^# author:/ { next } /^#/ { sub(/^# ?/,""); print; next } { exit }' "$0"
+}
+
+limit=50
+words=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    help) if [ $# -eq 1 ] && [ ${#words[@]} -eq 0 ]; then usage; exit 0; fi; words+=("$1"); shift ;;
+    -a|--all) limit=""; shift ;;
+    -n|--limit)
+      case "${2:-}" in
+        ''|*[!0-9]*) echo "✗ $1 needs a positive whole number — mf -h" >&2; exit 1 ;;
+      esac
+      limit=$((10#$2))
+      [ "$limit" -gt 0 ] || { echo "✗ $1 needs a positive whole number — mf -h" >&2; exit 1; }
+      shift 2 ;;
+    --) shift; words+=("$@"); break ;;
+    -*) echo "✗ unknown option $1 — mf -h" >&2; exit 1 ;;
+    *) words+=("$1"); shift ;;
+  esac
+done
+
+if [ ${#words[@]} -eq 0 ]; then
+  usage >&2
+  exit 1
+fi
+query="${words[*]}"
+
+if [ -n "$limit" ]; then
+  mdfind "$query" | head -n "$limit"
+  rc=("${PIPESTATUS[@]}")
+  # mdfind is cut off by head once the limit is reached (SIGPIPE, 141): that is success
+  [ "${rc[0]}" = 141 ] && rc[0]=0
+  exit $(( rc[0] ? rc[0] : rc[1] ))
+else
+  mdfind "$query"
+fi

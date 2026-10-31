@@ -16,7 +16,7 @@ curl -fsSL https://quixtop.com/i | sh -s -- pushlog
 
 Invoke it as `/pushlog` in Claude Code.
 
-Generate a pushlog entry documenting git changes — deterministic bash script computes paths/timestamp/diff range, LLM summarizes the filtered diff into bullets, secret-verifier gates the result. Runs the chatlog skill first. Use when logging git changes before a push.
+Generate a pushlog entry for git changes — a script computes paths, timestamp and diff range, the model summarizes the filtered diff, a secret check gates the result. Runs the chatlog skill first. Use when logging git changes before a push.
 
 ## Source
 

@@ -1,0 +1,103 @@
+{
+  "version": 1,
+  "meta": {
+    "project": "spec",
+    "owner": "shrix",
+    "spelling": "en-US"
+  },
+  "dictionary": [
+    {
+      "word": "panel",
+      "pos": "n",
+      "meaning": "a set of agents that run in one wave, each from one angle, with one merger",
+      "example": "The review PANEL has 5 roles.",
+      "not": [
+        "swarm",
+        "committee"
+      ]
+    },
+    {
+      "word": "lens",
+      "pos": "n",
+      "meaning": "one angle an idea-panel agent uses to attack the idea",
+      "example": "The cost LENS finds limits.",
+      "not": [
+        "persona",
+        "perspective"
+      ]
+    },
+    {
+      "word": "role",
+      "pos": "n",
+      "meaning": "one angle a review-panel agent uses to check the spec",
+      "example": "The fit ROLE reads Decided.",
+      "not": [
+        "persona",
+        "reviewer type"
+      ]
+    },
+    {
+      "word": "merger",
+      "pos": "n",
+      "meaning": "the agent that reads the panel's report files and writes one merged file",
+      "example": "The MERGER returns the counts.",
+      "not": [
+        "synthesizer",
+        "aggregator"
+      ]
+    },
+    {
+      "word": "concept",
+      "pos": "n",
+      "meaning": "the confirmed summary of a feature, saved as a draft spec before the spec is written",
+      "example": "A later run resumes the CONCEPT.",
+      "not": [
+        "brief",
+        "idea doc"
+      ]
+    },
+    {
+      "word": "save point",
+      "pos": "n",
+      "meaning": "the end of Step 3, where the concept is written to the spec file",
+      "example": "/spec think stops at the SAVE POINT.",
+      "not": [
+        "checkpoint"
+      ]
+    },
+    {
+      "word": "outline",
+      "pos": "n",
+      "meaning": "the short form of each step in SKILL.md that points to its reference file",
+      "example": "SKILL.md holds the step OUTLINE.",
+      "not": [
+        "skeleton",
+        "summary"
+      ]
+    }
+  ],
+  "anatomy": [],
+  "history": [
+    {
+      "date": "2026-10-28",
+      "score": 100,
+      "sentences": 20,
+      "fails": 0,
+      "checks": 0
+    },
+    {
+      "date": "2026-10-30",
+      "score": 100,
+      "sentences": 24,
+      "fails": 0,
+      "checks": 0
+    },
+    {
+      "date": "2026-10-31",
+      "score": 100,
+      "sentences": 27,
+      "fails": 0,
+      "checks": 0
+    }
+  ]
+}

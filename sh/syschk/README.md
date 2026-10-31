@@ -13,7 +13,8 @@ curl -fsSL https://quixtop.com/i | sh -s -- syschk
 ```text
 syschk.sh — macOS System Diagnostics
 Detects CPU hogs, ghost/orphaned processes, memory pressure, thermal throttling,
-disk pressure, suspicious launch agents, network anomalies, and Claude Code ecosystem issues.
+disk pressure, suspicious launch agents, network anomalies, Claude Code ecosystem issues,
+and the size of ~/.claude.json (total, plus the projects carrying the bulk).
 
 Usage:
   syschk.sh              # Full report

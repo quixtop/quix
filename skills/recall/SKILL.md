@@ -1,14 +1,7 @@
 ---
 name: recall
 author: shrix
-description: (shrix) >
-  (shrix) Look up EARLIER Claude Code sessions for this project — the ones a
-  /clear or a new window left behind. Answers "what did we do before the
-  clear", "which session had X", "what was I working on yesterday". Reads the
-  raw JSONL transcript store; never edits it. Triggers on /recall, /recall <term>,
-  "the previous session", "before the clear", "search my sessions for X".
-  NOT for the current conversation (use /pendings) and NOT for carrying state
-  forward (use /handoff).
+description: "(shrix) Look up EARLIER Claude Code sessions for this project — the ones a /clear or a new window left behind. Answers 'what did we do before the clear', 'which session had X', 'what was I working on yesterday'. Read-only. Triggers on /recall, /recall <term>, 'the previous session', 'before the clear', 'search my sessions for X'. NOT for the current conversation (use /pendings) or carrying state forward (use /handoff)."
 ---
 
 # /recall — reach back into earlier sessions
@@ -35,17 +28,20 @@ reuse. So earlier sessions are reachable only by an explicit lookup — this one
 | `--show <id> --full` | include assistant replies too |
 | `--show <id> --tail 0` | every prompt, no limit |
 | `--exclude <id>` | omit a session |
+| `--latest` | the newest real session only: id, when, title, prompts, last 3 chapters, last request (masked, cut to 100 chars), as `key: value` lines; stops reading early (1.5 s vs 6.8 s) |
 
 ## Why the filter is the whole point
 
 **Almost every transcript is agent scratch, not conversation.** In one real
-project the store held 491 transcripts of which only 6 were actual sessions;
-the other 485 were hook classifiers, chapter markers and gate checks, each a
-single boilerplate prompt. A naive listing returns nothing but noise.
+project the store held 2,014 transcripts of which only 5 were actual sessions;
+the other 2,009 were hook classifiers, chapter markers and gate checks, with
+fewer than three real prompts each. A naive listing returns nothing but noise.
 
 The cut is **structural** — at least `--min-prompts` real user prompts
 (default 3) — never a blacklist of known boilerplate, so it stays correct as
-new agent types appear. Injected turns (those starting with `<`) never count.
+new agent types appear. Injected turns never count: text starting with `<`,
+and entries the harness flags `isMeta` or `isCompactSummary` (skill and
+command bodies, image notes, hook feedback, compaction summaries).
 
 ## Running it
 
@@ -55,8 +51,8 @@ new agent types appear. Injected turns (those starting with `<`) never count.
    then pass `--exclude <id>`.
 2. **List before dumping.** Run bare (or with `-s`) first, pick the session,
    then `--show` it. A large session holds thousands of prompts.
-3. **`--tail` guards context**, defaulting to the last 40 prompts. Raise it
-   deliberately; `--tail 0` on a 1489-prompt session emits ~3 MB.
+3. **`--tail` guards context**: last 40 prompts by default; with `--full`
+   use 5-10. `--tail 0` on a 1435-prompt session emits ~280 KB.
 4. **Search by content, not by name.** Titles change within a session and
    repeat across sessions, so `-s "cc-xtn"` beats "the Scripts one".
 5. **State the scope you searched** — window and project — before reporting.

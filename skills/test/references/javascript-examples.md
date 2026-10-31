@@ -88,10 +88,7 @@ npm test -- tests/module.test.js
 ## Coverage Analysis
 
 ```bash
-# Count exports
-grep -r "export.*function" src/ --include="*.js" --include="*.ts" | wc -l
-grep -r "describe\|it\|test" tests/ --include="*.test.js" | wc -l
-
+# Counts: SKILL.md § Analyze Mode, Step 2
 # Coverage report
 npm test -- --coverage
 ```

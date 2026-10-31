@@ -27,7 +27,8 @@ set -euo pipefail
 # Trailing gap — one blank line after this script's output, TTY only, so piped
 # or redirected output stays exactly the data. Fires on every exit path.
 _gap() { [ -t 1 ] && printf '\n'; return 0; }
-trap _gap EXIT
+JSON_TMP=""   # json_edit's temp file, removed on any exit (an interrupted edit leaves no .cc-xtn.* behind)
+trap 'rm -f "${JSON_TMP:-}"; _gap' EXIT
 
 SETTINGS=~/.claude/settings.json
 # MCP servers live in ~/.claude.json, NOT settings.json — Claude Code reads
@@ -163,18 +164,25 @@ AGENT_DISABLED=~/.claude/disabled-agents
 
 die() { echo "cc-xtn: $*" >&2; exit 1; }
 
-# Atomic JSON edit with .bak backup. Reads → applies jq filter → validates →
-# atomic-renames into place. The .bak preserves the prior good state.
+# JSON edit with .bak backup. Reads → applies jq filter → validates → renames a
+# temp file over the REAL file (the link target): the swap is atomic, so a live
+# session never reads a half-written ~/.claude.json; a linked settings.json
+# stays a link; the temp file takes the target's mode first. The .bak keeps the
+# prior good state.
 json_edit() {
   local file="$1"; shift
-  local tmp; tmp=$(mktemp)
+  local target tmp
+  target=$(readlink -f "$file") || die "cannot resolve $file — nothing changed"
+  tmp=$(mktemp "$(dirname "$target")/.cc-xtn.XXXXXX") || die "no temp file next to $target — nothing changed"
+  JSON_TMP=$tmp
   jq "$@" "$file" > "$tmp" 2>/dev/null || { rm -f "$tmp"; die "jq filter failed"; }
   jq -e . "$tmp" >/dev/null || { rm -f "$tmp"; die "post-edit JSON invalid"; }
+  chmod "$(stat -f %Lp "$target")" "$tmp" || { rm -f "$tmp"; die "cannot copy the mode of $target — nothing changed"; }
   # Back up NEXT TO the edited file. A hardcoded settings.json.bak would be
   # wrong the moment a second config (~/.claude.json, for MCP) is edited — it
   # would overwrite the settings backup with the other file's contents.
-  cp "$file" "$file.bak"
-  mv "$tmp" "$file"
+  cp "$file" "$file.bak" || { rm -f "$tmp"; die "backup $file.bak failed — nothing changed"; }
+  mv -f "$tmp" "$target" || { rm -f "$tmp"; die "replacing $target failed — nothing changed"; }
 }
 
 # List entries in a dir (silent on missing dir) optionally trimming a suffix.

@@ -5,7 +5,7 @@ session and a parallel Codex job, producing a single synthesized "settled" answe
 plus a per-decision attribution footer.
 
 **Use it for:** hard architectural questions, library/framework choices, debugging
-strategies, design tradeoffs — anything where a 5–35 min adversarial second opinion
+strategies, design tradeoffs — anything where a 6–38 min adversarial second opinion
 is worth the wall-clock cost.
 
 **Don't use it for:** simple factual questions, syntax lookups, or anything you'd
@@ -54,7 +54,8 @@ Examples:
 
 ### Natural-language form
 
-Any message containing the word "clodex" triggers the skill. Examples that work:
+An explicit request that uses "clodex" as an action triggers the skill — an
+incidental mention does not. Examples that work:
 
 ```
 can you review the code over clodex
@@ -76,6 +77,20 @@ Effort: high  (auto-matched to Claude model: Opus)
 
 Proceed? (yes / edit query / cancel)
 ```
+
+### Panel mode — `--panel`
+
+```
+/clodex --panel <query>                  presets — one pick, then run
+/clodex --panel                          query inferred from the conversation, confirmed first
+/clodex --panel --pick                   agents picked in a widget
+/clodex --panel --agents <a>, <b> <query>
+```
+
+Several DIFFERENT models answer independently, critique once, and a neutral
+judge rules on evidence (it runs the tests for code); same-model panels are
+refused. No rounds, no revision, no synthesis — the procedure is
+`references/panel.md`, and nothing in the dialectic below applies to it.
 
 ---
 
@@ -266,9 +281,11 @@ State for each invocation lives at `/tmp/clodex-state/<timestamp>/`. Each invoca
 produces:
 
 - `query.txt`, `effort.txt`, `rounds.txt`, `cwd.txt` — invocation parameters
-- `r1-launch.log`, `r1-jobid.txt`, `r1-logfile.txt`, `r1-status.txt`, `r1-codex.md` — round 1 artifacts
-- `r2-codex-prompt.md`, `r2-launch.log`, `r2-jobid.txt`, `r2-logfile.txt`, `r2-status.txt`, `r2-codex.md` — round 2 artifacts
-- ... (one set per Codex round)
+- `r1/` — round 1's Codex job dir: `launch.log`, `jobid.txt`, `logfile.txt` (written
+  by the shared `launch-job.sh`) and `status.txt` (written by the shared `poll-job.sh`)
+- `r1-codex.md` — round 1's Codex answer
+- `r2-codex-prompt.md`, `r2/` (the same four files), `r2-codex.md` — round 2 artifacts
+- ... (one set per Codex round; the self-revision step's job dir is `revise/`)
 
 **Retention policy.** The skill keeps the **newest 10** state dirs and auto-purges
 older ones at the start of every new clodex invocation. So your most recent run is
@@ -376,12 +393,15 @@ unaffected; a `codex exec` probe returns normally with `✗ reachability` showin
 Those failures surface as `ERROR rmcp::transport::worker: worker quit with fatal:
 Transport channel closed` lines on stderr. They are noise, not failure — but they
 land in `r1-error.log`, so don't read their presence there as the cause of a failed
-round. The real gate is `bash $CODEX_SH <dir> setup --json | jq -e '.ready'`.
+round. The real gate is the shared `codex-preflight.sh`, which runs
+`codex setup --json` and checks `.ready`.
 
 ### Protocol seems to never finish
 
-Each round has a polling loop with no built-in timeout. If a Codex job hangs
-(rare), you can manually cancel it from any terminal:
+Each round's poller (the shared `poll-job.sh`, given `POLL_TIMEOUT_SECS=1800`) gives up after 30 min — status
+`timeout`, and the job is cancelled — or as soon as several polls in a row find no
+such job — status `missing`, nothing left to cancel. To stop a hung Codex job
+sooner, cancel it from any terminal:
 
 ```bash
 bash ~/.agents/skills/_shared/scripts/codex.sh <workspace-cwd> cancel <job-id>

@@ -16,7 +16,7 @@ curl -fsSL https://quixtop.com/i | sh -s -- todo
 
 Invoke it as `/todo` in Claude Code.
 
-Personal todo list manager backed by a configurable file (default ~/md/todo.md). Use when the user runs /todo to view, add, remove, complete/un-complete items, clear done items, or set the file path. Full subcommand grammar (prefix shorthands, -X/--XYZ flags, comma/range batches) is in the skill body. NOT for project task tracking (use tasks).
+Personal todo list manager backed by a configurable file (default ~/md/tasks.md, folders as ## headings). Use when the user runs /todo to view, add, remove, complete/un-complete items, clear done items, or set the file path. NOT for project task tracking (use proj-tasks).
 
 ## Source
 

@@ -12,7 +12,7 @@ curl -fsSL https://quixtop.com/i | sh -s -- recall
 
 Invoke it as `/recall` in Claude Code.
 
-> (shrix) Look up EARLIER Claude Code sessions for this project — the ones a /clear or a new window left behind. Answers "what did we do before the clear", "which session had X", "what was I working on yesterday". Reads the raw JSONL transcript store; never edits it. Triggers on /recall, /recall <term>, the previous session", "before the clear", "search my sessions for X". NOT for the current conversation (use /pendings) and NOT for carrying state forward (use /handoff).
+Look up EARLIER Claude Code sessions for this project — the ones a /clear or a new window left behind. Answers 'what did we do before the clear', 'which session had X', 'what was I working on yesterday'. Read-only. Triggers on /recall, /recall <term>, 'the previous session', 'before the clear', 'search my sessions for X'. NOT for the current conversation (use /pendings) or carrying state forward (use /handoff).
 
 ## Source
 

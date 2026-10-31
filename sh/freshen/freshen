@@ -1,0 +1,220 @@
+#!/usr/bin/env bash
+# (c) Shrix
+# author: shrix
+# freshen — update an installed external skill or Homebrew formula just before its
+# first use in 24 hours (strict-scope.md, owner 31Oct26): a name checked at 9:00 is
+# not checked again before 9:00 the next day.
+#   freshen <name>...                check each name not checked in the last 24 h
+#   freshen -f | --force <name>...   check even inside those 24 h
+#   freshen -n | --dry-run <name>... say what would run; change and record nothing
+#   freshen -h | --help | help
+# <name> is one of:
+#   a skill in ~/.agents/.skill-lock.json — DO_NOT_TRACK=1 npx -y skills@latest
+#     update <name> -g -y, into ~/.agents/skills/<the CLI's folder name>. The new
+#     version is scanned in place BEFORE anything is kept: keyscan --strict (secrets)
+#     and skillspctr (static skill scan; it fails above risk score 50). Both clean →
+#     only that folder is committed in ~/.agents (git commit -- <folder>, so other
+#     staged work is never touched). A hit, a scan that could not run, a failed
+#     commit or an interrupt (Ctrl-C, a closed tab) → the folder and the skills lock
+#     go back to their earlier versions (files a gitignore hides, e.g. node_modules,
+#     are left as they are); a run that died before that is restored by the next.
+#   a Homebrew formula — brew upgrade --formula <name>, old versions kept on disk
+# Skipped, and said so: your own skills (author: shrix), plugins (Claude Code updates
+# them per marketplace), unknown names. One freshen runs at a time: a second one
+# waits for nothing — it says so and checks nothing.
+# Run it outside the sandbox (a Terminal tab): it needs npm, GitHub and /opt/homebrew.
+# State: ~/.cache/freshen/<name> holds the epoch of the last good check
+# (FRESHEN_STATE moves it; FRESHEN_NOW stands in for the clock, for tests).
+# Log: ~/Library/Logs/freshen.log, one line per check (FRESHEN_LOG).
+# Exit: 0 every name current, updated or skipped · 1 a check failed (the committed
+# version stays in use) · 2 a restore failed (the line says what to run) · 64 usage.
+set -uo pipefail
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY
+RUNLOCK=""; INPROG=""
+_gap() { [ -t 1 ] && printf '\n'; return 0; }
+_unlock() { [ -n "$RUNLOCK" ] && rm -rf "$RUNLOCK"; return 0; }
+trap '_unlock; _gap' EXIT
+if [ $# -eq 1 ]; then case "$1" in -h|--help|help)
+  awk 'NR==1 { next } /^# \(c\)/ { next } /^# author:/ { next } /^#/ { sub(/^# ?/,""); print; next } { exit }' "$0"
+  exit 0 ;; esac
+fi
+. "$HOME/.local/bin/proj-env.sh" 2>/dev/null || status() {
+  case "$1" in fail) printf '✗ %s\n' "$2" >&2 ;; warn) printf '⚠ %s\n' "$2" ;; *) printf '✓ %s\n' "$2" ;; esac; }
+
+STATE="${FRESHEN_STATE:-$HOME/.cache/freshen}"
+LOG="${FRESHEN_LOG:-$HOME/Library/Logs/freshen.log}"
+AGENTS="${FRESHEN_AGENTS:-$HOME/.agents}"
+LOCK="$AGENTS/.skill-lock.json"
+NOW="${FRESHEN_NOW:-$(date +%s)}"
+case "$NOW" in ''|*[!0-9]*) printf '✗ freshen: FRESHEN_NOW must be epoch seconds\n' >&2; exit 64 ;; esac
+WINDOW=86400   # owner 31Oct26: once per 24 hours
+export HOMEBREW_NO_ANALYTICS=1
+force=0; dry=0; names=()
+usage() { status fail "freshen: $1 — see freshen -h"; exit 64; }
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -f|--force) force=1 ;;
+    -n|--dry-run) dry=1 ;;
+    -*) usage "unknown option '$1'" ;;
+    *) names+=("$1") ;;
+  esac
+  shift
+done
+[ ${#names[@]} -gt 0 ] || usage "name what to check"
+
+log() { [ "$dry" -eq 1 ] && return 0; mkdir -p "$(dirname "$LOG")" && printf '%s\t%s\t%s\n' "$(date '+%Y-%m-%d %H:%M')" "$1" "$2" >> "$LOG"; }
+stamp() { [ "$dry" -eq 1 ] && return 0; printf '%s\n' "$NOW" > "$STATE/stamp-$(printf '%s' "$1" | shasum | cut -c1-16)"; }
+# hours since the last good check, when it is inside the window (a stamp that is
+# not a plain epoch, or dated in the future, does not count)
+recent_hours() {
+  local f e
+  f="$STATE/stamp-$(printf '%s' "$1" | shasum | cut -c1-16)"
+  [ -f "$f" ] || return 1
+  e=$(head -1 "$f" 2>/dev/null)
+  case "$e" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$e" -le "$NOW" ] && [ $((NOW - e)) -lt "$WINDOW" ] || return 1
+  printf '%s\n' $(( (NOW - e) / 3600 ))
+}
+# 0 in the lock · 1 not in it · 2 the lock exists but cannot be read
+in_lock() {
+  [ -f "$LOCK" ] || return 1
+  python3 -I -c 'import json,sys
+try: d=json.load(open(sys.argv[1]))["skills"]
+except Exception: sys.exit(2)
+sys.exit(0 if sys.argv[2] in d else 1)' "$LOCK" "$1"
+}
+# the folder the skills CLI installs a name into (its sanitizeName): lowercase, each
+# run of characters outside [a-z0-9._] becomes '-', leading/trailing '.' and '-'
+# trimmed, cut to 255, empty → unnamed-skill
+cli_folder() { python3 -I -c 'import re,sys; s=re.sub(r"^[.-]+|[.-]+$", "", re.sub(r"[^a-z0-9._]+", "-", sys.argv[1].lower()))[:255]; print(s or "unnamed-skill")' "$1"; }
+# own skill: author: shrix in the frontmatter, top level or nested, quoted or not
+own_skill() {
+  tr -d '\r' < "$1/SKILL.md" 2>/dev/null | awk '
+    NR==1 { if ($0 != "---") exit 1; next }
+    $0 == "---" { exit found ? 0 : 1 }
+    /^[[:space:]]*author:[[:space:]]*["'"'"']?shrix["'"'"']?[[:space:]]*(#.*)?$/ { found=1 }
+    END { exit found ? 0 : 1 }'
+}
+# porcelain status of one path, untracked files always listed; fails closed
+rel_status() { git -C "$AGENTS" -c status.showUntrackedFiles=all status --porcelain --untracked-files=all -- "$1"; }
+# put the folder and the skills lock back to their earlier versions; 0 done · 1 not
+restore_old() {
+  local rel="$1"
+  git -C "$AGENTS" restore --source=HEAD --staged --worktree -- "$rel" 2>/dev/null &&
+    git -C "$AGENTS" clean -fdq -- "$rel" >/dev/null 2>&1 || return 1
+  [ ! -f "$STATE/skill-lock.before" ] || cp -p "$STATE/skill-lock.before" "$LOCK" || return 1
+  rm -f "$STATE/inprogress"; INPROG=""
+}
+restore_or_say() {   # restore_or_say <name> <rel> <why> → prints the outcome; 1 restored · 2 not
+  if restore_old "$2"; then
+    status fail "$1: $3 — committed version restored"; log "$1" "skill ✗ $3, restored"; return 1
+  fi
+  status fail "$1: $3 — could NOT restore $2, the new version is still on disk; run: git -C $AGENTS restore --source=HEAD --staged --worktree -- $2 && git -C $AGENTS clean -fd -- $2"
+  log "$1" "skill ✗ $3, RESTORE FAILED"; return 2
+}
+on_signal() {
+  if [ -n "$INPROG" ]; then restore_old "$INPROG" || status fail "freshen: interrupted — could NOT restore $INPROG; the next freshen run restores it"; fi
+  exit 130
+}
+
+fresh_skill() {   # fresh_skill <name> <rel> → 0 current/updated · 1 failed, restored · 2 restore failed
+  local n="$1" rel="$2" dir="$AGENTS/$2" rc sha st
+  if [ "$dry" -eq 1 ]; then
+    echo "would run: DO_NOT_TRACK=1 npx -y skills@latest update \"$n\" -g -y; scan $rel (keyscan --strict, skillspctr); commit only $rel"; return 0
+  fi
+  git -C "$AGENTS" rev-parse --is-inside-work-tree >/dev/null 2>&1 ||
+    { status fail "$n: $AGENTS is not a git repo — nothing to restore from, not updating"; log "$n" "skill ✗ no repo"; return 1; }
+  st=$(rel_status "$rel") || { status fail "$n: git status failed in $AGENTS — not updating"; log "$n" "skill ✗ git status failed"; return 1; }
+  if [ -n "$st" ]; then
+    status fail "$n: $rel has uncommitted changes — not updating over them"; log "$n" "skill ✗ uncommitted changes"; return 1
+  fi
+  cp -p "$LOCK" "$STATE/skill-lock.before" || { status fail "$n: cannot back up $LOCK — not updating"; return 1; }
+  printf '%s\n' "$rel" > "$STATE/inprogress"; INPROG="$rel"
+  if ! DO_NOT_TRACK=1 npx -y skills@latest update "$n" -g -y > "$STATE/last-npx.log" 2>&1 ||
+     grep -qE 'Failed to check|Failed to update|No installed skills found matching|cannot be checked automatically|Cannot update' "$STATE/last-npx.log"; then
+    restore_or_say "$n" "$rel" "the skills CLI could not check it (see $STATE/last-npx.log)"; return $?
+  fi
+  st=$(rel_status "$rel") || { restore_or_say "$n" "$rel" "git status failed after the update"; return $?; }
+  if [ -z "$st" ]; then
+    rm -f "$STATE/inprogress"; INPROG=""
+    log "$n" "skill ✓ current"; status ok "$n: current"; return 0
+  fi
+  # the new version is on disk: scan it before keeping anything
+  keyscan --strict "$dir" > "$STATE/last-keyscan.log" 2>&1; rc=$?
+  case "$rc" in
+    0) ;;
+    1) restore_or_say "$n" "$rel" "keyscan found a secret in the update (see $STATE/last-keyscan.log)"; return $? ;;
+    *) restore_or_say "$n" "$rel" "keyscan could not run (exit $rc)"; return $? ;;
+  esac
+  skillspctr "$dir" > "$STATE/last-scan.log" 2>&1; rc=$?
+  case "$rc" in
+    0) ;;
+    1) restore_or_say "$n" "$rel" "skillspctr flagged the update (risk score above 50; see $STATE/last-scan.log)"; return $? ;;
+    *) restore_or_say "$n" "$rel" "skillspctr could not run (exit $rc)"; return $? ;;
+  esac
+  git -C "$AGENTS" add -A -- "$rel" &&
+    git -C "$AGENTS" commit -q -m "freshen: $n updated by the skills CLI" -- "$rel" >/dev/null 2>&1 ||
+    { restore_or_say "$n" "$rel" "commit failed"; return $?; }
+  rm -f "$STATE/inprogress"; INPROG=""
+  sha=$(git -C "$AGENTS" rev-parse --short HEAD)
+  log "$n" "skill ✓ updated $sha"; status ok "$n: updated ($sha; undo: git -C $AGENTS revert $sha)"
+}
+
+fresh_brew() {   # fresh_brew <name> → 0 current/updated · 1 failed
+  local n="$1" before after
+  if [ "$dry" -eq 1 ]; then echo "would run: HOMEBREW_NO_INSTALL_CLEANUP=1 brew upgrade --formula $n"; return 0; fi
+  before=$(brew list --formula --versions "$n" 2>/dev/null)
+  HOMEBREW_NO_INSTALL_CLEANUP=1 brew upgrade --formula "$n" > "$STATE/last-brew.log" 2>&1 ||
+    { status fail "$n: brew upgrade failed (see $STATE/last-brew.log)"; log "$n" "brew ✗ upgrade failed"; return 1; }
+  after=$(brew list --formula --versions "$n" 2>/dev/null)
+  if [ "$before" = "$after" ]; then log "$n" "brew ✓ current ($after)"; status ok "$n: current ($after)"
+  else log "$n" "brew ✓ $before → $after"; status ok "$n: $before → $after (old version kept on disk)"; fi
+}
+
+if [ "$dry" -eq 0 ]; then
+  mkdir -p "$STATE" || { status fail "freshen: cannot create $STATE"; exit 1; }
+  # one run at a time; a lock whose run is gone (killed, crashed) is broken
+  if ! mkdir "$STATE/run.lock" 2>/dev/null; then
+    held=$(cat "$STATE/run.lock/pid" 2>/dev/null)
+    case "$held" in ''|*[!0-9]*) held=0 ;; esac
+    if [ "$held" -gt 0 ] && kill -0 "$held" 2>/dev/null; then
+      status warn "freshen: another freshen (pid $held) is running — nothing checked"; exit 0
+    fi
+    rm -rf "$STATE/run.lock"; mkdir "$STATE/run.lock" || { status fail "freshen: cannot take $STATE/run.lock"; exit 1; }
+  fi
+  RUNLOCK="$STATE/run.lock"; printf '%s\n' "$$" > "$RUNLOCK/pid"
+  trap on_signal INT TERM HUP
+  # an earlier run that died mid-update left its folder unscanned: restore it first
+  if [ -f "$STATE/inprogress" ]; then
+    left=$(head -1 "$STATE/inprogress")
+    case "$left" in skills/?*) ;; *) left="" ;; esac
+    if [ -n "$left" ] && restore_old "$left"; then status warn "freshen: restored $left, left unscanned by an interrupted run"
+    else status fail "freshen: an interrupted run left $STATE/inprogress and it could not be restored — check it by hand"; exit 2; fi
+  fi
+fi
+
+ok_n=0; skip_n=0; fail_n=0; worst=0
+for n in "${names[@]}"; do
+  case "$n" in */*|.*|'') status warn "$n: not a plain name — skipped"; skip_n=$((skip_n+1)); continue ;; esac
+  if [ "$force" -eq 0 ] && h=$(recent_hours "$n"); then
+    echo "$n: checked ${h} h ago — next check after 24 h"; skip_n=$((skip_n+1)); continue
+  fi
+  in_lock "$n"; lk=$?
+  if [ "$lk" -eq 2 ]; then status fail "freshen: cannot read $LOCK — no skill can be checked"; fail_n=$((fail_n+1)); worst=1; continue; fi
+  if [ "$lk" -eq 0 ]; then
+    rel="skills/$(cli_folder "$n")"
+    if [ ! -d "$AGENTS/$rel" ]; then status warn "$n: in the skills lock but $AGENTS/$rel is missing — skipped"; skip_n=$((skip_n+1)); continue; fi
+    if own_skill "$AGENTS/$rel"; then echo "$n: your own skill (author: shrix) — skipped"; skip_n=$((skip_n+1)); continue; fi
+    fresh_skill "$n" "$rel"; rc=$?
+    if [ "$rc" -eq 0 ]; then stamp "$n"; ok_n=$((ok_n+1)); else fail_n=$((fail_n+1)); [ "$rc" -gt "$worst" ] && worst=$rc; fi
+  elif command -v brew >/dev/null && brew list --formula --versions "$n" >/dev/null 2>&1; then
+    if fresh_brew "$n"; then stamp "$n"; ok_n=$((ok_n+1)); else fail_n=$((fail_n+1)); [ "$worst" -lt 1 ] && worst=1; fi
+  else
+    status warn "$n: not an external skill or a Homebrew formula — skipped"; skip_n=$((skip_n+1))
+  fi
+done
+verb=checked; [ "$dry" -eq 1 ] && verb="would be checked"
+if [ "$fail_n" -eq 0 ]; then status ok "freshen: $ok_n $verb, $skip_n skipped"; exit 0; fi
+if [ "$worst" -eq 2 ]; then status fail "freshen: $fail_n failed — a restore FAILED (see above), $ok_n $verb, $skip_n skipped"; exit 2; fi
+status fail "freshen: $fail_n failed (committed version kept), $ok_n $verb, $skip_n skipped"
+exit 1

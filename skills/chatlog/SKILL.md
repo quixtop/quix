@@ -1,7 +1,7 @@
 ---
 name: chatlog
 author: shrix
-description: "(shrix) Log significant chat interactions from a dev session into the project chatlog (docs/logs/chatlog.md) — project-scoped, newest-first, secret-redacting. Also invoked FIRST by the pushlog push workflow (must complete before pushlog.sh runs)."
+description: "(shrix) Log significant chat interactions of a dev session into the project chatlog (docs/logs/chatlog.md) — project-scoped, newest-first, secrets redacted."
 metadata:
   version: "1.2"
   category: documentation
@@ -10,9 +10,6 @@ metadata:
 # Chat Interaction Logger
 
 Capture significant development conversations for project context and reference.
-
-Run at the end of a development session, after significant decisions, or as
-the first step of the pushlog workflow.
 
 ---
 
@@ -50,10 +47,6 @@ Examples: `[11Sep25/9.42p]`, `[11Sep25/9.42a]`
 
 ---
 
-## Legacy `•` self-heal (via pushlog)
-
-`pushlog.sh` rewrites legacy `  • ` (U+2022) bullets here to `  - `, at the 2-space-indent position only — a stray flush-left `• ` is NOT self-healed, so never write `•` in new entries. Markers only; `•` inside bullet text is untouched. **Standalone `chatlog` invocations skip this step**; migration lives in `pushlog.sh`.
-
 ---
 
 ## Secret-handling rules (mandatory)
@@ -64,7 +57,7 @@ The chatlog is committed to the repository. A leaked secret here is permanent in
 - **Common leak vector**: the user pastes a token into chat for debugging ("here's the failing request, the token is sk-…"). Don't echo the token in a bullet. Describe the action — `debugged auth flow with user-provided token` — not the value.
 - **File contents from sensitive files** (`.env`, `secrets.*`, `credentials.*`, `*.pem`, `id_rsa`, `service-account*.json`, `auth.json`, `.netrc`, `.aws/credentials`, etc.) must never be quoted in bullets even if they were displayed in the conversation. Reference by intent: `rotated env var X` or `inspected service account scopes`, never the value or even the specific key name if it's secret-bearing.
 - **PII** (emails, phone numbers, real names, home addresses) follows the same rule unless it's explicitly task-relevant and already public in the repo.
-- **When in doubt, redact.** A vaguer bullet is recoverable; a leaked secret in committed history requires rotation + history rewrite. The pushlog flow runs a `--verify` scan over chatlog as well as pushlog — if you write a secret-shaped string here, that scan will fail and block the push.
+- **When in doubt, redact.** A vaguer bullet is recoverable; a leaked secret in committed history requires rotation + history rewrite. A pre-push secret scan may read this file; a secret-shaped string here fails it and blocks the push.
 - **The "I'm explaining the bug" trap (mandatory)**: when documenting debugging stories that compare two forms of a value — URL-encoding (raw vs `%`-encoded), escaping (single-quoted vs literal), parsing/interpolation (input vs output), Base64 / hex / JSON encoding — the LLM is tempted to quote BOTH forms "so the reader can see the transformation." DO NOT. Replace both forms with placeholders (`<RAW>` / `<URL-ENCODED>`, or generic `<value>` / `<value-encoded>`) and describe the bug structurally. Example bullet: *"URL-encoding the `@` and `!` chars in the DB password (raw → `%`-encoded form) to fix configparser interpolation breakage"* — never quote either side. The bug story is preserved; the secret isn't. The `--verify` scan only catches known token *shapes* (`sk-…`, `AKIA…`, `eyJ…`); an arbitrary password matches no pattern and slips through unless this rule is followed at write time. **Verifier is a backstop, not the primary defense.**
 
 ---
@@ -80,10 +73,28 @@ Log significant interactions from current development session:
 - Significant debugging sessions
 - Architecture discussions
 
+### Step 1b: Several sessions on one project (an Ensemble)
+
+When this session's Desktop title ends in three digits (`<Project> - 000`, `- 001` …) and
+`ensemble path` names a ledger that exists, work on this project ran in SEVERAL sessions, and
+only the leader (`000`) writes the chatlog — at the user's `/push`. A worker (`001`+) writes
+no entry: it says the chatlog is the leader's at `/push` and stops. The leader collects
+everything since the newest entry in the chatlog (its timestamp, converted to UTC ISO):
+
+1. `ensemble since <that time> --json` — every task by FEATURE, each with its worker
+   session number, summary and commits.
+2. Its own conversation, as in Step 1.
+3. Where a row's summary leaves a gap, `/recall` over that row's session fills it.
+
+One entry: the leader's own conversation first, then one group of bullets per feature, each
+group naming the session that did it (`- **auth:login-retry** (001): …`). The project and
+secret filters below apply to every session's part alike. No ledger, or not a
+three-digit title → Step 1 alone, as for any session.
+
 ### Step 2: Generate Summary
 
 Create bullet-point summary for the session:
-- **Session title**: ONE timestamp (current time when chatlog is run), followed by a `>` bold summary line
+- **Session title**: one timestamp (§ Session Title Format), followed by a `>` bold summary line
 - **Title casing**: title body is lowercase prose (verbs, common nouns, adjectives), but **keep acronyms and proper nouns capitalized** so readers can identify them at a glance — `PRD`, `OAuth`, `API`, `CLI` and the like, plus product and brand names (`OpenAI`, `macOS`, `YouTube`, `TypeScript`). File-name fragments matching actual filenames stay lowercase (e.g., `arch`, `func`, `spec` referencing `arch.md`/`func.md`/`spec.md`).
 - **Bullets**: plain `- ` (markdown list marker — so entries render as a real bulleted list on github.com; do NOT use `• ` (U+2022) which markdown does not recognize as a list marker and folds consecutive lines into a soft-wrapped paragraph) — NO individual timestamps on each bullet
 - Brief description of what was done and key outcomes
@@ -134,7 +145,7 @@ The top title for each session entry uses **the current time when chatlog is run
 
 ❌ **Don't write full transcripts** - Bullet point summaries only
 
-❌ **Don't duplicate pushlog content** - Chatlog captures conversation context, pushlog captures git changes
+❌ **Don't log git changes** - Chatlog captures conversation context only
 
 ❌ **Don't log without file references** - Include relevant files when applicable
 

@@ -1,9 +1,9 @@
 ---
 name: pendings
 author: shrix
-description: "(shrix) End-of-session sweep of the CURRENT conversation for anything the user may have missed — unanswered questions, undecided choices, pending/deferred work, unclaimed offers, warnings flagged in passing, manual checks still owed. Read-only; reads the raw transcript when compacted. Use before wrapping up or /handoff, or on 'did I miss anything?' / 'what's still open?'."
+description: "(shrix) End-of-session sweep of the CURRENT conversation for anything the user may have missed — unanswered questions, undecided choices, deferred work, unclaimed offers, warnings flagged in passing, checks still owed. Read-only; `topic:<words>` scopes it. Use before wrapping up, or on 'did I miss anything?' / 'what's still open?'."
 metadata:
-  version: "1.1"
+  version: "1.3"
   category: status
 ---
 
@@ -20,25 +20,24 @@ skim the report — which recreates the original problem.
 
 **Compaction is the worst offender.** Once a long session is summarized, the
 granular items — one-line offers, minor tweaks, micro-decisions — are the
-FIRST casualties. A scan of the live context alone therefore silently drops
-exactly what this skill exists to catch. When the session has been compacted,
-the **raw transcript on disk is the source of truth**, not the in-context
-summary — see Scan Procedure Step 0.
+FIRST casualties, which is why a compacted session is scanned from its raw
+transcript (Step 0).
 
 ## Invocation
 
 - `/pendings` — full report
 - `/pendings <word>` — filter to matching categories (e.g. `questions`,
   `pending`, `offers`, `verify`)
-- `/pendings help` — handled by the generic shrix self-help rule
+- `/pendings topic:<words>` — only items about that one topic (§ Topic scope)
+- `/pendings help` (or `-h`, `--help`) — print this skill's description and
+  how to invoke it, then stop
 
 ## Hard Constraints
 
-- **Full session, not just live context.** The record you must sweep is the
-  ENTIRE session. After a compaction your live context holds only a lossy
-  summary of the early turns, so when the session was compacted you MUST read
-  the raw transcript from disk (Step 0) and scan that. Treating the in-context
-  summary as complete is a guaranteed miss.
+- **Full session, not just live context.** Sweep the ENTIRE session; after a
+  compaction that means the raw transcript (Step 0) — the in-context summary
+  is a guaranteed miss. `topic:` narrows what is classified, never what is
+  searched (§ Topic scope).
 - **Do the scan yourself; no subagent.** You are the only reader that sees both
   the live turns AND (via the transcript file) the compacted ones — a subagent
   sees neither reliably. Reading the on-disk transcript file yourself is
@@ -47,7 +46,7 @@ summary — see Scan Procedure Step 0.
   The user opts in by replying with an item number.
 - **Conversation only.** Scan what was actually said in THIS session — the
   transcript IS that record. Never invent items from system-prompt rules,
-  CLAUDE.md, or task files (`/tasks` and `/todo` own those).
+  CLAUDE.md, or task files (`/proj-tasks` and `/todo` own those).
 
 ## Scan Procedure
 
@@ -60,8 +59,9 @@ LOSSY — recover the rest before you scan:
 
 - **Find the transcript.** Usually the path is surfaced in a system-reminder.
   Otherwise it is `~/.claude/projects/<cwd-slug>/<session-id>.jsonl`, where
-  `<cwd-slug>` is the working directory with every `/` replaced by `-` (leading
-  `-` kept).
+  `<cwd-slug>` is the cwd with every character that is not an ASCII letter or
+  digit (`/`, `.`, accents) replaced by `-` — an emoji by `--` — and a slug
+  over 200 characters cut and given a suffix (match its first 200).
 - **Read it efficiently.** If it is large, don't load it blind — grep for
   open-item signals: assistant turns containing `?`, and phrasings like
   "want me to", "should I", "your call", "I'd suggest", "we could", "offer",
@@ -74,6 +74,32 @@ LOSSY — recover the rest before you scan:
   summary dropping it is NOT resolution.
 - **Only if unreadable** (transcript missing/inaccessible) do you fall back to
   the summary and flag the weaker survival caveat.
+
+### Topic scope (`topic:<words>`)
+
+Search the whole record, but only to LOCATE the topic; classify inside it
+alone:
+
+- **Spans** — every chapter mark whose title matches the topic. A span runs
+  from the last user prompt before that mark to the last user prompt before
+  the next mark: the prompt that opened a topic comes before its mark. Match
+  by meaning, not substring: a 40-character title rarely repeats the topic's
+  exact words. Find marks by structure, never by grepping the text
+  `Chapter marked: …` — rules and edits quoted into the transcript contain it
+  and yield fake marks. In the raw `.jsonl`, a mark is a `tool_use` block in an
+  assistant entry's `message.content` whose `name` ends in `mark_chapter`, its
+  title at `input.title`; this lists them in order:
+  `jq -r 'select(.type=="assistant")|.message.content[]?|select(.type=="tool_use" and (.name|endswith("mark_chapter")))|.input.title' <transcript>`.
+  In live context, a mark is one of your own `mark_chapter` calls.
+- **Plus** any other turn that names the topic's key terms.
+- **Classify only those turns.** Resolution still counts wherever it happened:
+  before listing an item, check the rest of the session for its answer.
+- **Name the scope** in the heading: `## ⏳ pendings — <n> open item(s) ·
+  topic: <words>`.
+- **Nothing matches** — no span AND no key-term turn → output only
+  `⚠️ No turns found for topic: <words> — check the topic name.` Never fall
+  back to the whole session silently, and never print the clean-topic line
+  (§ Output Contract): that one means the topic was found with nothing open.
 
 ### Step 1 — Walk and classify
 
@@ -99,8 +125,8 @@ superseded / still open. Report only still-open items. Scan both directions:
 
 ## Output Contract
 
-A TABLE, not a prose list — compiled points default to tabular form
-(`communication.md` § Tables). One row per item, scannable at a glance:
+A TABLE, not a prose list — compiled points default to tabular form.
+One row per item, scannable at a glance:
 
 ```
 ## ⏳ pendings — <n> open item(s)
@@ -117,7 +143,8 @@ A TABLE, not a prose list — compiled points default to tabular form
   headings are unnecessary.
 - Keep `item` to a title plus one clause, and `next` to an imperative. If a
   row needs more, it belongs in a sentence BELOW the table, not inside it.
-- Width: obey the injected per-row cap (`communication.md`). If the four
+- Width: keep each row within the per-row cap when one is injected,
+  otherwise about 10 columns under the terminal width. If the four
   columns won't fit, drop `next` into the `item` cell rather than wrapping.
 
 - Priority mapping: 🔴 = awaiting a decision or blocking (cats 1, 2, and
@@ -135,6 +162,10 @@ A TABLE, not a prose list — compiled points default to tabular form
   _(possibly addressed)_ — a false open beats a silent drop.
 - Nothing found: output only
   `✅ Nothing outstanding — everything raised was addressed.`
+- Topic-scoped (`topic:<words>`): append ` · topic: <words>` to the heading
+  and to the nothing-found line, so a clean topic never reads as a clean
+  session. A topic that was never found gets the ⚠️ line from § Topic scope
+  instead.
 - If the session was compacted, you were REQUIRED to recover items from the
   raw transcript (Step 0); append one line confirming it — e.g. "Scanned the
   full transcript, not just the in-context summary." Fall back to the weaker

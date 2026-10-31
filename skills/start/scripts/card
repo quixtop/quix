@@ -1,0 +1,524 @@
+#!/usr/bin/env python3
+# (c) Shrix
+# author: shrix
+#
+# card — the /start context card for the project in the current folder: an
+# unread handoff, the last session, git state, open work, the last push and
+# ship, the stack, run commands, services by env-var NAME and the docs present.
+# Read-only; 2.5–3.5 s on three real projects (7Oct26), the last-session
+# lookup running alongside the rest.
+#
+# Usage:
+#   card                      the card for the current folder
+#   card --session <id>       leave that session (the current one) out of
+#                             "Last session"
+#   card -h | --help | help   this help
+#
+# Values never reach the output: services are env-var names cut out by the
+# matcher itself, no .env file is opened (.env.example only, names only), and
+# the last session's text comes masked from recall-scan.py --latest. A line the
+# card cannot fill says why, or is left out.
+
+import atexit, glob, json, os, re, shutil, subprocess, sys
+from collections import Counter
+
+atexit.register(lambda: sys.stdout.isatty() and print())
+
+RECALL = os.path.expanduser("~/.agents/skills/recall/scripts/recall-scan.py")
+W = 13
+GENERIC = {"PATH", "HOME", "USER", "SHELL", "TERM", "PWD", "LANG", "TMPDIR", "TZ",
+           "CI", "DEBUG", "NODE_ENV", "NODE_OPTIONS", "PORT", "HOST", "HOSTNAME",
+           "ENV", "MODE", "DEV", "PROD", "LOG_LEVEL", "VERBOSE", "PYTHONPATH"}
+# one capture group each: the NAME, never the value
+ENV_PATTERNS = [
+    r"\benv\.([A-Z][A-Z0-9_]{2,})",                         # process.env / import.meta.env / Workers env
+    r"os\.environ(?:\.get)?[\[(]\s*[\"']([A-Z][A-Z0-9_]+)",  # Python
+    r"os\.getenv\(\s*[\"']([A-Z][A-Z0-9_]+)",
+    r"os\.Getenv\(\"([A-Z][A-Z0-9_]+)",                      # Go
+    r"env::var\(\"([A-Z][A-Z0-9_]+)",                        # Rust
+    r"Deno\.env\.get\([\"']([A-Z][A-Z0-9_]+)",
+    r"ENV\[[\"']([A-Z][A-Z0-9_]+)",                          # Ruby
+    r"secrets\.([A-Z][A-Z0-9_]+)",                           # CI secrets by name
+]
+NEVER = ["!.git/", "!*.env*", "!.env*", "!.dev.vars", "!*.tfvars", "!*.pem", "!*.key",
+         "!secrets/**", "!*credentials*", "!node_modules/"]
+LANG = {"ts": "TS", "tsx": "TS", "js": "JS", "mjs": "JS", "cjs": "JS", "jsx": "JS",
+        "py": "Python", "go": "Go", "rs": "Rust", "swift": "Swift", "sh": "Shell",
+        "bash": "Shell", "zsh": "Shell", "rb": "Ruby", "java": "Java", "kt": "Kotlin",
+        "c": "C", "cpp": "C++", "cs": "C#", "php": "PHP", "dart": "Dart", "lua": "Lua"}
+FRAMEWORKS = {"react": "React", "preact": "Preact", "vue": "Vue", "svelte": "Svelte",
+              "next": "Next.js", "astro": "Astro", "hono": "Hono", "express": "Express",
+              "fastify": "Fastify", "electron": "Electron", "solid-js": "Solid",
+              "django": "Django", "flask": "Flask", "fastapi": "FastAPI"}
+TESTERS = {"vitest": "vitest", "jest": "jest", "mocha": "mocha", "@playwright/test": "playwright",
+           "pytest": "pytest"}
+
+
+def usage():
+    out = []
+    with open(__file__, errors="replace") as fh:
+        for i, line in enumerate(fh):
+            if i == 0 or line.startswith(("# (c)", "# author:")):
+                continue
+            if not line.startswith("#"):
+                break
+            out.append(re.sub(r"^# ?", "", line.rstrip("\n")))
+    return "\n".join(out).strip("\n")
+
+
+def run(cmd, cwd, timeout=15):
+    """stdout of a successful run, else None."""
+    try:
+        r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=timeout, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return r.stdout if r.returncode == 0 else None
+
+
+def cut(s, n):
+    s = " ".join(str(s).split())
+    return s if len(s) <= n else s[:n - 1] + "…"
+
+
+def row(label, text, indent="  ", width=W):
+    return f"{indent}{label:<{width}}{text}"
+
+
+def read_head(path, n):
+    try:
+        with open(path, errors="replace") as fh:
+            return [l.rstrip("\n") for _, l in zip(range(n), fh)]
+    except OSError:
+        return []
+
+
+def load_json(path):
+    try:
+        with open(path, errors="replace") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
+# -- sections -----------------------------------------------------------------
+def git_state(root):
+    out = run(["git", "--no-optional-locks", "status", "--porcelain=v2", "--branch"], root)
+    if out is None:
+        return None
+    st = {"branch": "?", "ab": None, "upstream": False, "changed": 0}
+    for l in out.splitlines():
+        if l.startswith("# branch.head "):
+            st["branch"] = l[len("# branch.head "):]
+        elif l.startswith("# branch.upstream "):
+            st["upstream"] = True
+        elif l.startswith("# branch.ab "):
+            a, b = l.split()[2:4]
+            st["ab"] = (int(a), -int(b))
+        elif l and not l.startswith("#"):
+            st["changed"] += 1
+    stash = run(["git", "stash", "list"], root)
+    st["stash"] = len(stash.splitlines()) if stash else 0
+    return st
+
+
+def header(root, is_git, g):
+    parts = [f"▶ start · {os.path.basename(root)}"]
+    if not is_git:
+        parts.append("not a git repo")
+        return " · ".join(parts)
+    if g is None:
+        parts.append("git status unavailable (timed out or refused)")
+        return " · ".join(parts)
+    b = g["branch"]
+    if g["ab"]:
+        b += f" ↑{g['ab'][0]} ↓{g['ab'][1]}"
+    elif not g["upstream"]:
+        b += " (no upstream)"
+    parts.append(b)
+    parts.append(f"{g['changed']} changed" if g["changed"] else "clean")
+    if g["stash"]:
+        parts.append(f"{g['stash']} stash")
+    return " · ".join(parts)
+
+
+def handoffs(root):
+    out = []
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        return out
+    for f in names:
+        if not re.fullmatch(r"HANDOFF[^/]*\.md", f):
+            continue
+        topic = date = ""
+        for l in read_head(os.path.join(root, f), 12):
+            if not topic and l.startswith("# "):
+                topic = re.sub(r"^#\s*(Handoff\s*[—-]\s*)?", "", l.strip())
+            m = re.match(r">\s*Origin:\s*(.*)", l)
+            if m:
+                parts = [p.strip() for p in m.group(1).split("·")]
+                date = parts[2] if len(parts) > 2 else ""
+        text = f'{f} — "{cut(topic, 50)}"' + (f" · {date}" if date else "")
+        out.append(row("Handoff", text + " → read it first"))
+    return out
+
+
+def start_recall(sid):
+    if not os.path.isfile(RECALL):
+        return None
+    cmd = [sys.executable, RECALL, "--latest"] + (["--exclude", sid] if sid else [])
+    try:
+        return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                stdin=subprocess.DEVNULL, text=True, encoding="utf-8",
+                                errors="replace")
+    except OSError:
+        return None
+
+
+def last_session(proc):
+    if proc is None:
+        return [row("Last session", "/recall not installed")]
+    try:
+        out, err = proc.communicate(timeout=30)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        return [row("Last session", "lookup timed out → /recall")]
+    if proc.returncode != 0:
+        if err.startswith("no session store"):
+            return [row("Last session", "none found for this folder")]
+        return [row("Last session", "lookup failed → /recall")]
+    kv = {}
+    for l in out.splitlines():
+        k, sep, v = l.partition(": ")
+        if sep:
+            kv.setdefault(k, []).append(v)
+    if "id" not in kv:
+        return [row("Last session", "none found for this folder")]
+    first = lambda k: (kv.get(k) or [""])[0]
+    lines = [row("Last session", f'{first("when")} · "{first("title")}" · '
+                 f'{first("prompts")} prompts · {first("id")[:8]}')]
+    if kv.get("chapter"):
+        lines.append(row("chapters", " › ".join(kv["chapter"]), "    ", W - 2))
+    if first("ask"):
+        lines.append(row("last ask", f'"{first("ask")}"', "    ", W - 2))
+    return lines
+
+
+def tracked(root, is_git):
+    if is_git:
+        out = run(["git", "ls-files", "-z"], root, timeout=20)
+        if out is not None:
+            return [p for p in out.split("\0") if p]
+    files, skip = [], {"node_modules", ".git", "dist", "build", "venv", ".venv", "__pycache__"}
+    for d, dirs, names in os.walk(root):
+        depth = os.path.relpath(d, root).count(os.sep)
+        dirs[:] = [x for x in dirs if x not in skip and depth < 3]
+        files += [os.path.relpath(os.path.join(d, n), root) for n in names]
+        if len(files) > 20000:
+            break
+    return files
+
+
+def open_work(root):
+    cands = [p for p in ("docs/proj/tasks.md", "docs/tasks.md", "TODO.md", "TASKS.md", "tasks.md")
+             if os.path.isfile(os.path.join(root, p))]
+    tdir = os.path.join(root, "docs", "tasks")
+    if os.path.isdir(tdir):
+        for d, _, names in os.walk(tdir):
+            cands += [os.path.relpath(os.path.join(d, n), root) for n in sorted(names) if n.endswith(".md")]
+    try:                                # show each name as it is spelled on disk
+        on_disk = {n.lower(): n for n in os.listdir(root)}
+    except OSError:
+        on_disk = {}
+    seen, uniq = set(), []              # TASKS.md and tasks.md are one file on macOS
+    for p in cands:
+        try:
+            st = os.stat(os.path.join(root, p))
+        except OSError:                 # a dangling link: skip that file, not the row
+            continue
+        if (st.st_dev, st.st_ino) not in seen:
+            seen.add((st.st_dev, st.st_ino))
+            uniq.append(on_disk.get(p.lower(), p) if "/" not in p else p)
+    cands = uniq
+    if not cands:
+        return [row("Open work", "no tasks file")]
+    n = 0
+    for p in cands:
+        try:
+            with open(os.path.join(root, p), errors="replace") as fh:
+                n += sum(1 for l in fh if re.match(r"\s*[-*] \[ \]", l))
+        except OSError:
+            pass
+    where = cands[0] + (f" +{len(cands) - 1}" if len(cands) > 1 else "")
+    lead = f"{n} unchecked · " if n else ""
+    return [row("Open work", f"{lead}{where} → /proj-tasks")]
+
+
+def shipped(root):
+    bits = []
+    for l in read_head(os.path.join(root, "docs", "logs", "pushlog.md"), 60):
+        m = re.match(r"\*\*(.+?)\*\*\s*\[([^\]]+)\]", l)
+        if m:
+            bits.append(f'push {m.group(2).replace(" ", "")} "{cut(m.group(1), 40)}"')
+            break
+    date, title, hands, checks = "", "", 0, 0
+    try:
+        with open(os.path.join(root, "docs", "logs", "deplogs.md"), errors="replace") as fh:
+            for l in fh:
+                if re.match(r"\[\d{1,2}[A-Z][a-z]{2}\d{2}/[^\]]+\]", l):
+                    if date:
+                        break
+                    date = l.strip().strip("[]")
+                    continue
+                if date and not title:
+                    m = re.match(r">\s*\*\*(.+?)\*\*", l)
+                    if m:
+                        title = m.group(1)
+                if date and "✋" in l:
+                    hands += 1
+                if date and "[chk]" in l:
+                    checks += 1
+    except OSError:
+        pass
+    if date:
+        bits.append(f'dep {date}' + (f' "{cut(title, 40)}"' if title else "") +
+                    (f" · {hands} ✋" if hands else ""))
+    # only a dep that listed checks is owed a smoke report
+    smoke = newest_smoke(root, date if checks else "")
+    if smoke:
+        bits.append("smoke " + smoke)
+    if not bits:
+        return []
+    fix = "/shipped -w" if "❌" in (smoke or "") else "/shipped"
+    return [row("Shipped", " · ".join(bits) + f" → {fix}")]
+
+
+def newest_smoke(root, dep_date):
+    """✅/❌/⬜ marks of the NEWEST report in docs/logs/verilog.md only — a
+    glance; the full newest-wins count across deps is /proj-tasks -f's. A newest
+    dep that report does not name is unreported, whatever older reports say.
+    dep_date is given only when that dep listed checks."""
+    marks, started = Counter(), False
+    try:
+        with open(os.path.join(root, "docs", "logs", "verilog.md"), errors="replace") as fh:
+            for l in fh:
+                # a report header starts the line with `DDMonYY or [DDMonYY
+                if re.match(r"[`\[]\d{1,2}[A-Z][a-z]{2}\d{2}\b", l):
+                    if started:
+                        break
+                    if dep_date and dep_date not in l:
+                        return "newest dep not yet reported"
+                    started = True
+                    continue
+                m = re.match(r"\s*[-*]\s*(✅|❌|⬜)", l)
+                if started and m:
+                    marks[m.group(1)] += 1
+    except OSError:                     # no verilog yet: owed only if checks were listed
+        return "newest dep not yet reported" if dep_date else ""
+    return " ".join(f"{k}{marks[k]}" for k in ("❌", "⬜", "✅") if marks[k])
+
+
+def project(root, files):
+    near = [f for f in files if f.count("/") <= 2]
+    base = Counter(os.path.basename(f) for f in near)
+    tags = []
+    workers = sum(base[n] for n in ("wrangler.toml", "wrangler.json", "wrangler.jsonc"))
+    if workers:
+        tags.append("Cloudflare Workers" + (f" ×{workers}" if workers > 1 else ""))
+    for f in near:
+        if os.path.basename(f) == "manifest.json":
+            m = load_json(os.path.join(root, f))
+            if isinstance(m, dict) and "manifest_version" in m:
+                tags.append("browser extension")
+                break
+    deps = set()
+    for f in near:
+        if os.path.basename(f) == "package.json":
+            p = load_json(os.path.join(root, f))
+            if isinstance(p, dict):
+                for k in ("dependencies", "devDependencies"):
+                    if isinstance(p.get(k), dict):
+                        deps |= set(p[k])
+    py = ""                             # Python manifests, as text: names only
+    for f in near:
+        if os.path.basename(f) in ("pyproject.toml", "requirements.txt", "requirements-dev.txt"):
+            py += "\n".join(read_head(os.path.join(root, f), 400)).lower() + "\n"
+    # a dependency spec only: quoted ("flask>=2") or at a line's start (requirements),
+    # never a metadata line (keywords = ["flask"], description = "…")
+    deps_text = "\n".join(l for l in py.splitlines() if not re.match(
+        r"\s*(keywords|description|name|classifiers|readme|license|authors)\s*=", l))
+    for name in re.findall(r"(?:[\"']|^)\s*(django|flask|fastapi|pytest)(?![a-z0-9_-])",
+                           deps_text, re.M):
+        deps.add(name)
+    tags += [v for k, v in FRAMEWORKS.items() if k in deps]
+    for marker, tag in (("pyproject.toml", "Python pkg"), ("go.mod", "Go module"),
+                        ("Cargo.toml", "Cargo"), ("Package.swift", "SwiftPM"),
+                        ("pubspec.yaml", "Flutter"), ("Gemfile", "Bundler"),
+                        ("Dockerfile", "Docker")):
+        if base[marker]:
+            tags.append(tag)
+    tests = [v for k, v in TESTERS.items() if k in deps]
+    if base["bunfig.toml"] or base["bun.lock"] or base["bun.lockb"]:
+        tests.append("bun test")
+    if base["pytest.ini"] or base["conftest.py"]:
+        tests.append("pytest")
+    langs = Counter(LANG[e] for e in (f.rsplit(".", 1)[-1].lower() for f in files if "." in f)
+                    if e in LANG)
+    # docs, tests and examples never decide the kind; templates/ alone is not a UI
+    # (skills and scaffolds carry one); server dirs count within the first four
+    # levels (src/server/, crates/<name>/src/api/)
+    code = [f for f in files if not re.match(r"(docs?|tests?|examples?)/", f)]
+    ui = any(re.search(r"(^|/)components/", f) or os.path.basename(f) == "index.html"
+             for f in code)
+    server = workers or any(re.match(r"([^/]+/){0,3}(server|api|routes|workers)/", f)
+                            for f in code)
+    pkg = load_json(os.path.join(root, "package.json"))
+    pkg = pkg if isinstance(pkg, dict) else {}
+    cli = ("bin" in pkg or "[project.scripts]" in py or "[tool.poetry.scripts]" in py
+           or any(f.startswith("cmd/") for f in files))
+    lib = (any(k in pkg for k in ("main", "exports", "module")) or "[project]" in py
+           or "[tool.poetry]" in py or "src/lib.rs" in files or base["go.mod"] > 0)
+    kind = ("full-stack" if ui and server else "frontend" if ui else
+            "service / infra" if server else "CLI" if cli else
+            "library" if lib else "tooling / scripts")
+    text = " · ".join(x for x in [kind, " ".join(l for l, _ in langs.most_common(3)),
+                                  ", ".join(dict.fromkeys(tags)),
+                                  ", ".join(dict.fromkeys(tests))] if x)
+    return [row("Project", text)]
+
+
+def run_cmds(root):
+    bits = []
+    pkg = load_json(os.path.join(root, "package.json"))
+    if isinstance(pkg, dict) and isinstance(pkg.get("scripts"), dict) and pkg["scripts"]:
+        pm = ("bun" if any(os.path.exists(os.path.join(root, f)) for f in ("bun.lock", "bun.lockb"))
+              else "pnpm" if os.path.exists(os.path.join(root, "pnpm-lock.yaml"))
+              else "yarn" if os.path.exists(os.path.join(root, "yarn.lock")) else "npm")
+        names = list(pkg["scripts"])
+        bits.append(f"{pm}: " + " ".join(names[:8]) + (" …" if len(names) > 8 else ""))
+    for mk in ("Makefile", "makefile", "justfile"):
+        targets = []
+        for l in read_head(os.path.join(root, mk), 400):
+            m = re.match(r"([A-Za-z0-9][A-Za-z0-9_.-]*)\s*:(?!=)", l)
+            if m and m.group(1) not in targets:
+                targets.append(m.group(1))
+        if targets:
+            bits.append(f"{mk}: " + " ".join(targets[:8]) + (" …" if len(targets) > 8 else ""))
+    lj = load_json(os.path.join(root, ".claude", "launch.json"))
+    if isinstance(lj, dict):
+        names = [c.get("name") for c in lj.get("configurations") or [] if isinstance(c, dict) and c.get("name")]
+        if names:
+            bits.append("launch.json: " + " ".join(names[:8]) + (" …" if len(names) > 8 else ""))
+    return [row("Run", " · ".join(bits))] if bits else []
+
+
+def services(root):
+    if not shutil.which("rg"):
+        return [row("Services", "rg not installed → /start --deep")]
+    base = ["rg", "--hidden", "--no-messages", "-o", "--no-filename", "--no-line-number",
+            "--max-filesize", "1M"]
+    code = base[:]
+    for g in NEVER:
+        code += ["-g", g]
+    for p in ENV_PATTERNS:
+        code += ["-e", p]
+    code += ["-r", "".join("${%d}" % i for i in range(1, len(ENV_PATTERNS) + 1)), "."]
+    example = base + ["-g", ".env.example", "-g", "!.git/", "-g", "!node_modules/",
+                      "-e", r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=", "-r", "${1}", "."]
+    names = set()
+    for cmd in (code, example):
+        try:
+            r = subprocess.run(cmd, cwd=root, capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", timeout=20, stdin=subprocess.DEVNULL)
+        except (OSError, subprocess.TimeoutExpired):
+            return [row("Services", "scan timed out → /start --deep")]
+        names |= {n.strip() for n in r.stdout.splitlines()
+                  if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", n.strip())}
+    names -= GENERIC
+    if not names:
+        return [row("Services", "no env-var names in code")]
+    groups = Counter(n.split("_")[0] for n in names)
+    top = groups.most_common(6)
+    rest = len(groups) - len(top)
+    text = " ".join(f"{k}({v})" for k, v in top) + (f" +{rest} more" if rest > 0 else "")
+    return [row("Services", f"{text} · {len(names)} names → --deep")]
+
+
+def docs(root):
+    # a "*" path counts only when a file matches (an empty docs/tasks/ is no tasks file)
+    have = lambda *ps: any(glob.glob(os.path.join(root, p), recursive=True) if "*" in p
+                           else os.path.exists(os.path.join(root, p)) for p in ps)
+    found = [p for p in ("CLAUDE.md", "AGENTS.md", "AI.md", "README.md", "DESIGN.md") if have(p)]
+    for name, paths in (("reqs", ("docs/reqs.md", "docs/reqs", "REQUIREMENTS.md", "docs/requirements")),
+                        ("arch", ("docs/arch.md", "docs/arch", "ARCHITECTURE.md")),
+                        ("design", ("docs/design",)),
+                        ("tasks", ("docs/proj/tasks.md", "docs/tasks.md", "docs/tasks/**/*.md",
+                                   "TODO.md", "TASKS.md", "tasks.md")),
+                        ("logs", ("docs/logs",))):
+        if have(*paths):
+            found.append(name)
+    out = [row("Docs", " · ".join(found) if found else "none")]
+    if not have("CLAUDE.md", "AGENTS.md"):
+        out[0] += " · no CLAUDE.md → /init"
+        para = []
+        for l in read_head(os.path.join(root, "README.md"), 60):
+            s = l.strip()
+            if not s:
+                if para:
+                    break
+                continue
+            if s.startswith(("#", "[!", "![", "<", "---", "===")):
+                continue
+            para.append(s)
+        if para:
+            out.insert(0, row("About", cut(" ".join(para), 100)))
+    return out
+
+
+def main():
+    args = sys.argv[1:]
+    if args in (["-h"], ["--help"], ["help"]):
+        print(usage())
+        return 0
+    sid = ""
+    if args[:1] == ["--session"] and len(args) <= 2:
+        sid = args[1] if len(args) == 2 else ""    # an empty session id: none to exclude
+    elif args:
+        print(usage(), file=sys.stderr)
+        return 64
+    proc = start_recall(sid)            # the slow part runs while the rest is read
+    top = run(["git", "rev-parse", "--show-toplevel"], os.getcwd())
+    root = top.strip() if top else os.getcwd()
+    is_git = top is not None
+
+    def guarded(label, fn):             # one unreadable source never sinks the card
+        try:
+            return fn()
+        except Exception as e:
+            return [row(label, f"failed ({type(e).__name__}) — skipped")]
+
+    try:
+        g = git_state(root) if is_git else None
+    except Exception:
+        g = None                        # the header then says git status is unavailable
+    try:
+        files = tracked(root, is_git)
+    except Exception:
+        files = []                      # Project and Services degrade; nothing crashes
+    lines = [header(root, is_git, g)]
+    lines += guarded("Handoff", lambda: handoffs(root))
+    body = []
+    for label, fn in (("Open work", lambda: open_work(root)), ("Shipped", lambda: shipped(root)),
+                      ("Project", lambda: project(root, files)), ("Run", lambda: run_cmds(root)),
+                      ("Services", lambda: services(root)), ("Docs", lambda: docs(root))):
+        body += guarded(label, fn)
+    lines += guarded("Last session", lambda: last_session(proc))
+    lines += body
+    print("\n".join(lines))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

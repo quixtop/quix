@@ -1,4 +1,6 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# (c) Shrix
+# author: shrix
 # audit-render-status.sh — read-only audit of pushlog/chatlog files across the
 # user's dev directories. Identifies candidates for retroactively migrating
 # the • → - bullet character, so existing entries render as a real bulleted
@@ -15,17 +17,30 @@
 # Usage:
 #   bash ~/.agents/skills/pushlog/scripts/audit-render-status.sh
 #   bash ~/.agents/skills/pushlog/scripts/audit-render-status.sh | column -t -s $'\t'
+#   audit-render-status.sh -h | --help | help
+# Needs bash 4+ (associative arrays): macOS /bin/bash 3.2 is refused with a message.
 
 set -e
+_gap() { [ -t 1 ] && printf '\n'; return 0; }
+trap _gap EXIT
+case "${1:-}" in -h|--help|help)
+    awk 'NR==1 { next } /^# \(c\)/ { next } /^# author:/ { next } /^#/ { sub(/^# ?/,""); print; next } { exit }' "$0"
+    exit 0 ;;
+esac
+if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+    echo "audit-render-status.sh: needs bash 4+ (this is $BASH_VERSION) — run it with Homebrew bash" >&2
+    exit 1
+fi
 
 # Roots to scan. Override with colon-separated PUSHLOG_AUDIT_ROOTS.
 if [ -n "${PUSHLOG_AUDIT_ROOTS:-}" ]; then
     IFS=':' read -r -a ROOTS <<< "$PUSHLOG_AUDIT_ROOTS"
 else
-    ROOTS=(
-        "/Volumes/NVMe2TB/shrix/Dev"
-        "/Users/shrix/Dev"
-    )
+    # ~/Dev plus its real path when it is a symlink (find does not descend a
+    # symlinked start point), real path first.
+    ROOTS=("$HOME/Dev")
+    real_dev=$(cd "$HOME/Dev" 2>/dev/null && pwd -P)
+    [ -n "$real_dev" ] && [ "$real_dev" != "$HOME/Dev" ] && ROOTS=("$real_dev" "$HOME/Dev")
 fi
 
 # Filenames the pushlog / chatlog skills auto-detect.
@@ -190,8 +205,10 @@ for repo_root in "${!REPO_LOGS[@]}"; do
     [ -n "$pushlog" ] && log_summary="${pushlog#$repo_root/}"
     [ -n "$chatlog" ] && log_summary="${log_summary:+$log_summary, }${chatlog#$repo_root/}"
 
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$project" "$visibility" "$push_n" "$chat_n" "$repo_root" "$log_summary"
-done | sort -t$'\t' -k2,2 -k3,3nr   # primary: visibility (public sorts before private alphabetically), secondary: push_n desc
+    # leading rank column puts public rows first (alphabetically "private" < "public"); cut drops it
+    [ "$visibility" = public ] && rank=0 || rank=1
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$rank" "$project" "$visibility" "$push_n" "$chat_n" "$repo_root" "$log_summary"
+done | sort -t$'\t' -k1,1n -k3,3 -k4,4nr | cut -f2-   # public first, then visibility, then push_n desc
 
 printf '\n' >&2
 printf '%bsort key:%b visibility (public first), then pushlog entry count (descending)\n' "$DIM" "$NC" >&2

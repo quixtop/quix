@@ -1,7 +1,7 @@
 ---
 name: pushlog
 author: shrix
-description: "(shrix) Generate a pushlog entry documenting git changes — deterministic bash script computes paths/timestamp/diff range, LLM summarizes the filtered diff into bullets, secret-verifier gates the result. Runs the chatlog skill first. Use when logging git changes before a push."
+description: "(shrix) Generate a pushlog entry for git changes — a script computes paths, timestamp and diff range, the model summarizes the filtered diff, a secret check gates the result. Runs the chatlog skill first. Use when logging git changes before a push."
 metadata:
   version: "2.1"
   category: documentation
@@ -24,15 +24,10 @@ Generates a timestamped pushlog entry documenting git changes. Thin wrapper arou
 **Project scope**: pushlog is inherently scoped to *this* repo — `git diff` only sees changes inside the repo tree, so off-project edits (dotfiles, `~/.claude/`, other repos) never reach the bullets by construction. Your job is to summarize that diff, **not** the conversation: don't pull in off-project tangents discussed during the session. (`chatlog` applies the matching path + topic filter on the conversation side.)
 
 ## What the script handles automatically
-
-- **First-run setup** — if pushlog.md has no entries, creates both `docs/logs/pushlog.md` and `docs/logs/chatlog.md` with correct headers, then exits. Run again after changes.
-- **Diff range detection** — prefers `@{u}..HEAD` (commits ahead of upstream), falls back to `git diff HEAD` (working tree), aborts cleanly with "nothing to log" if both are empty.
-- **Initial-commit scenario** — on the repo's first commit, emits a preformatted collapsed entry (`- initial project scaffold (N files, M lines)`) instead of a 30-bullet dump.
-- **Meta-file exclusion** — removes `pushlog.md`, `chatlog.md`, `CHANGELOG.md`, and variants from the changed-files list so they can never appear in bullets.
-- **Timestamp formatting** — deterministic `DDMonYY / H.MMp` format (e.g. `08Apr26 / 11.47a`) via `date` + `tr -s ' '` + `sed`.
-- **Large-entry footer** — appends `- net change: N files, +A −B lines` for diffs touching 10+ files. Derived from `git diff --shortstat`.
-- **Project name normalization** — for first-run headers, prefers `git remote origin` basename, strips version suffixes (`-v2`), replaces `-`/`_` with space, titlecases first char.
-- **Legacy `•` self-heal** — rewrites legacy `• ` (U+2022) bullet markers to `- ` in both files. Markers only; `•` inside bullet text is untouched. Idempotent. Migrated lines stage with your next `git add`; stderr emits `📋 One-time bullet migration: …` with a count.
+First-run setup, diff-range detection, the initial-commit entry, meta-file
+exclusion, the timestamp format, the large-entry footer, project naming and
+the legacy `•` self-heal are all the script's job — details in
+`references/script.md`, read only when the script's behaviour is in question.
 
 ## What the LLM does (LLM-side)
 
@@ -84,15 +79,7 @@ The pushlog is committed to the repository. A leaked secret here is permanent in
 
 ## Invocation
 
-```bash
-bash ~/.agents/skills/pushlog/scripts/pushlog.sh
-```
-
-The script reads `pwd` to find the project and emits to stdout. No arguments. No env vars required.
-
-### Companion script (manual, read-only — not part of the push flow)
-
-`scripts/audit-render-status.sh` — fleet-wide audit of pushlog/chatlog files across the dev roots: reports each repo's pushlog/chatlog entry counts and GitHub visibility as TSV (pipe to `column -t -s $'\t'`), for spotting repos worth checking for legacy `• ` bullets. Makes zero file mutations. Roots default to the standard dev trees; override with colon-separated `PUSHLOG_AUDIT_ROOTS`.
+The script (Flow step 2) reads `pwd` to find the project and emits to stdout. No arguments. No env vars required.
 
 ## Entry format (example)
 

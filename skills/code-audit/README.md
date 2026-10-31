@@ -16,7 +16,7 @@ curl -fsSL https://quixtop.com/i | sh -s -- code-audit
 
 Invoke it as `/code-audit` in Claude Code.
 
-Use when asked for a comprehensive audit or health review of the whole repo/codebase — 'audit this repo', 'full audit', 'codebase health check', 'review the whole project', periodic quality sweep. Read-only: reports findings, never modifies anything. NOT for reviewing a diff, branch, or PR (use /code-review directly or the code-review plugin).
+Audit or health review of the whole repo — 'audit this repo', 'full audit', 'codebase health check', 'review the whole project', periodic quality sweep. Read-only: reports verified findings and the trend since the previous audit; writes only its revlogs entry. NOT for a diff, branch or PR (use /code-review).
 
 ## Source
 

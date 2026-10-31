@@ -1,6 +1,6 @@
 # proj-env.sh
 
-Shared shell helpers three of these scripts source — status lines, colours, project paths.
+Shared shell helpers five of these scripts source — status lines, colours, project paths.
 
 ## Install
 

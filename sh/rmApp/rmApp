@@ -44,6 +44,11 @@ set -u
 # or redirected output stays exactly the data. Fires on every exit path.
 _gap() { [ -t 1 ] && printf '\n'; return 0; }
 trap _gap EXIT
+# bash 4+ only (${x,,}, declare -A): stock macOS /bin/bash 3.2 stops here, cleanly
+_rm_help=0; for _a in "$@"; do case "$_a" in -h|--help) _rm_help=1 ;; esac; done
+if [ "${BASH_VERSINFO[0]:-0}" -lt 4 ] && [ "$_rm_help" -eq 0 ]; then
+    echo "✗ rmApp needs bash 4 or newer (brew install bash) — nothing removed" >&2; exit 1
+fi
 
 # ─── Arg parsing ────────────────────────────────────────────────────────────
 FORCE=0

@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# (c) Shrix
+# author: shrix
+set -euo pipefail
+
+# Trailing gap — one blank line after this script's output, TTY only, so piped
+# or redirected output stays exactly the data. Fires on every exit path.
+_gap() { [ -t 1 ] && printf '\n'; return 0; }
+trap _gap EXIT
+
+show_help() {
+    cat <<'HELP'
+logs — print or follow the project's server log with ANSI stripping
+
+USAGE
+  logs                       Print $SERVER_LOG (default: tmp/server.log under project root)
+  logs -f, --follow, follow  Follow it live (tail -f), stripped as lines arrive
+  logs -h, --help, help      Show this help
+
+ENV
+  SERVER_LOG    Override log path (default: $PROJECT_DIR/tmp/server.log via proj-env.sh)
+HELP
+}
+
+FOLLOW=0
+case "${1:-}" in
+    -h|--help|help) show_help; exit 0 ;;
+    -f|--follow|follow) FOLLOW=1 ;;
+esac
+
+source "$(dirname "${BASH_SOURCE[0]}")/proj-env.sh"
+detect_project
+[[ -f "$SERVER_LOG" ]] || { echo "logs: $SERVER_LOG not found" >&2; exit 1; }
+if [[ $FOLLOW -eq 1 ]]; then
+    tail -f "$SERVER_LOG" | sed -u 's/\x1b\[[0-9;]*m//g'
+else
+    sed 's/\x1b\[[0-9;]*m//g' "$SERVER_LOG"
+fi

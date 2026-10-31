@@ -3,7 +3,8 @@
 # author: shrix
 # syschk.sh — macOS System Diagnostics
 # Detects CPU hogs, ghost/orphaned processes, memory pressure, thermal throttling,
-# disk pressure, suspicious launch agents, network anomalies, and Claude Code ecosystem issues.
+# disk pressure, suspicious launch agents, network anomalies, Claude Code ecosystem issues,
+# and the size of ~/.claude.json (total, plus the projects carrying the bulk).
 #
 # Usage:
 #   syschk.sh              # Full report
@@ -58,6 +59,14 @@ RUN_DISK=true; RUN_AGENTS=true; RUN_NET=true; RUN_CLAUDE=true
 # version-named session that matched neither test would be offered for killing.
 CLAUDE_COMM_RE='^(claude|[0-9]+\.[0-9]+\.[0-9]+)$'
 DEV_COMM_RE='^(claude|[0-9]+\.[0-9]+\.[0-9]+|bun|node|rg|esbuild|npx|tsx|deno)$'
+# A parentless process is dead weight only when its command line names an MCP
+# server: a bare node/bun/npx/tsx/deno with PPID=1 is just as likely a dev
+# server started with & or nohup from a closed terminal, and killing that is
+# unrecoverable. A verbatim copy of kill-orphans' KILL_RE (~/.claude/bin);
+# update both — ~/.agents/tests/skills/runctl/test_syschk_kill_class.sh fails
+# when they differ. kill-orphans also reaps a plugin server by its working
+# folder (its launcher gone); syschk only reports that one as risky.
+MCP_LEFTOVER_RE='[-]-cwd [^ ]*/\.claude/plugins/cache/|_npx/.*/\.bin/[a-z0-9_-]*mcp|@modelcontextprotocol|mcp-server|server-mcp|[-/]mcp\.(js|mjs|cjs|ts)'
 
 # --- Process snapshot (captured once, used by all checks) ---
 PS_SNAPSHOT=""
@@ -72,7 +81,7 @@ SKIPPED_COUNT=0
 # --- Report card tracking ---
 # Per-section grades (simple vars, bash 3.2 compatible)
 GRADE_CPU=ok; GRADE_Processes=ok; GRADE_Memory=ok; GRADE_Thermal=ok
-GRADE_Disk=ok; GRADE_Agents=ok; GRADE_Network=ok; GRADE_Claude=ok
+GRADE_Disk=ok; GRADE_Agents=ok; GRADE_Network=ok; GRADE_Claude=ok; GRADE_Config=ok
 
 # Remediation suggestions
 REMEDIATIONS=()
@@ -131,6 +140,25 @@ add_fix() {
   FIX_WHY[$FIX_COUNT]="$2"
   FIX_CLASS[$FIX_COUNT]="${3:-manual}"
   ((FIX_COUNT++))
+}
+
+fix_class_for() {
+  # Usage: fix_class_for <pid> <comm> → safe | risky
+  # The class for killing a parentless process: safe only for an rg search or
+  # an MCP leftover (MCP_LEFTOVER_RE on its command line); anything else may be
+  # work the user started, so --fix prints it and never runs it. A process ps
+  # can no longer see is risky too.
+  [[ "$2" == "rg" ]] && { echo safe; return; }
+  if ps -p "$1" -o args= 2>/dev/null | grep -qE "$MCP_LEFTOVER_RE"; then echo safe; else echo risky; fi
+}
+
+short_args() {
+  # Usage: short_args <pid> — the program and its first argument, a flag's
+  # value cut: enough to recognise a server, never a --token=… it was given
+  # (the report can land in a transcript).
+  local s
+  s=$(ps -p "$1" -o args= 2>/dev/null | awk '{ a = $2; sub(/=.*/, "=…", a); print $1, a }')
+  printf '%s' "${s:-?}"
 }
 
 # --- Helpers ---
@@ -204,7 +232,7 @@ parse_args() {
         echo "  -v, --verbose   Extra detail (process trees, full lsof)"
         echo "  --cpu           CPU analysis only"
         echo "  --mem           Memory analysis only"
-        echo "  --proc          Process analysis (orphans + zombies + claude ecosystem)"
+        echo "  --proc          Process analysis (orphans + zombies + claude ecosystem + ~/.claude.json size)"
         echo "  --disk          Disk usage only"
         echo "  --net           Network analysis only"
         echo "  --therm         Thermal state only"
@@ -367,12 +395,22 @@ check_orphans() {
     local cpu_int=${cpu%.*}
     [[ -z "$cpu_int" ]] && cpu_int=0
 
-    # Dev tool orphans are always critical
+    # Dev tool orphans: critical dead weight when they are MCP leftovers or a
+    # stuck rg; any other may be a server the user started, so only a warning
     if echo "$comm" | grep -qiE "^(bun|node|rg|deno|esbuild|npx|tsx)$"; then
-      crit "Orphaned dev worker: PID %-7s %-15s CPU: %s%%  MEM: %s%%  Runtime: %s" "$pid" "$comm" "$cpu" "$mem" "$etime"
-      crit "  Likely leftover from crashed parent. Kill with: kill $pid"
-      grade_section "Processes" "crit"
-      add_fix "kill $pid" "orphaned $comm worker" safe
+      if [[ "$(fix_class_for "$pid" "$comm")" == safe ]]; then
+        crit "Orphaned dev worker: PID %-7s %-15s CPU: %s%%  MEM: %s%%  Runtime: %s" "$pid" "$comm" "$cpu" "$mem" "$etime"
+        crit "  Likely leftover from crashed parent. Kill with: kill $pid"
+        grade_section "Processes" "crit"
+        add_fix "kill $pid" "orphaned $comm worker" safe
+      else
+        local sargs
+        sargs=$(short_args "$pid")
+        warn "Parentless %s: PID %-7s CPU: %s%%  MEM: %s%%  Runtime: %s" "$comm" "$pid" "$cpu" "$mem" "$etime"
+        warn "  May be a server you started with & or nohup: %s" "$sargs"
+        grade_section "Processes" "warn"
+        add_fix "kill $pid" "parentless $comm — check it is not yours first: $sargs" risky
+      fi
       found=true
     elif (( cpu_int > 10 )); then
       warn "Orphaned process using CPU: PID %-7s %-15s CPU: %s%%  Runtime: %s" "$pid" "$comm" "$cpu" "$etime"
@@ -541,6 +579,11 @@ check_thermal() {
 
   if [[ -z "$therm_output" ]]; then
     info "pmset thermal data unavailable"
+  elif echo "$therm_output" | grep -qE 'Failed to get|error code 0x'; then
+    # pmset could not read the state (e.g. inside a sandbox): unmeasured, not a warning
+    echo -e "  ${DIM}[SKIP] thermal state not readable here ($(echo "$therm_output" | head -1)) — not measured${NC}"
+    grade_section "Thermal" "skip"
+    (( SKIPPED_COUNT++ )) || true
   elif echo "$therm_output" | grep -q "No thermal warning"; then
     ok "No thermal warnings recorded"
   else
@@ -806,14 +849,13 @@ check_claude_ecosystem() {
   pgids=$(echo "$dev_procs" | awk '{print $3}' | sort -u)
 
   local session_count=0
-  local ghost_groups=0
-  local orphan_workers=0
+  local ghost_groups=0     # dead weight only — safe to kill
+  local orphan_workers=0   # dead weight only — safe to kill
+  local parentless=0       # parentless, but may be the user's — warn, never crit
 
   for pgid in $pgids; do
     local group_procs
     group_procs=$(echo "$dev_procs" | awk -v g="$pgid" '$3 == g')
-    local group_count
-    group_count=$(echo "$group_procs" | wc -l | tr -d ' ')
 
     # Find root process (PID == PGID)
     local root_alive=false
@@ -855,15 +897,32 @@ check_claude_ecosystem() {
         done
       fi
     else
-      # Ghost group — root is dead but workers remain
-      ((ghost_groups++))
-      local group_cpu
+      # Ghost group — root is dead but workers remain. `kill -- -PGID` takes
+      # EVERY member, not only the dev tools found above, so the group is safe
+      # only when every member in the full snapshot is dead weight.
+      local group_cpu gclass=safe gpid gcomm all_members all_count
       group_cpu=$(echo "$group_procs" | awk '{sum+=$4} END {printf "%.1f", sum}')
-      crit "Ghost process group (PGID $pgid): $group_count workers, total CPU: ${group_cpu}%"
-      crit "  Root process (PID $pgid) is dead — workers are orphaned"
-      crit "  Kill with: kill -- -$pgid"
-      grade_section "Claude" "crit"
-      add_fix "kill -- -$pgid" "ghost group (PGID $pgid, ${group_count} workers)" safe
+      all_members=$(echo "$PS_SNAPSHOT" | tail -n +2 | awk -v g="$pgid" '$3 == g')
+      all_count=$(echo "$all_members" | grep -c .)
+      while read -r gpid _ _ _ _ _ _ gcomm; do
+        [[ -n "$gpid" && "$(fix_class_for "$gpid" "$gcomm")" != safe ]] && gclass=risky
+      done <<< "$all_members"
+      if [[ "$gclass" == safe ]]; then
+        ((ghost_groups++))
+        crit "Ghost process group (PGID $pgid): $all_count workers, total CPU: ${group_cpu}%"
+        crit "  Root process (PID $pgid) is dead — workers are orphaned"
+        crit "  Kill with: kill -- -$pgid"
+        grade_section "Claude" "crit"
+        add_fix "kill -- -$pgid" "ghost group (PGID $pgid, ${all_count} workers)" safe
+      else
+        ((parentless++))
+        warn "Process group without its root (PGID $pgid): $all_count processes — may be a server you started:"
+        while read -r gpid _; do
+          [[ -n "$gpid" ]] && warn "    PID %s: %s" "$gpid" "$(short_args "$gpid")"
+        done <<< "$all_members"
+        grade_section "Claude" "warn"
+        add_fix "kill -- -$pgid" "group PGID $pgid holds a process that may be yours — check it first" risky
+      fi
 
       if $VERBOSE; then
         echo "$group_procs" | while IFS= read -r line; do
@@ -889,11 +948,20 @@ check_claude_ecosystem() {
     fi
 
     if ! $pgid_has_claude && ! [[ "$comm" =~ $CLAUDE_COMM_RE ]]; then
-      ((orphan_workers++))
-      crit "Orphaned worker: PID $pid ($comm) — PPID=1, no parent claude session"
-      crit "  Kill with: kill $pid"
-      grade_section "Claude" "crit"
-      add_fix "kill $pid" "orphaned $comm (no parent session)" safe
+      if [[ "$(fix_class_for "$pid" "$comm")" == safe ]]; then
+        ((orphan_workers++))
+        crit "Orphaned worker: PID $pid ($comm) — PPID=1, no parent claude session"
+        crit "  Kill with: kill $pid"
+        grade_section "Claude" "crit"
+        add_fix "kill $pid" "orphaned $comm (no parent session)" safe
+      else
+        ((parentless++))
+        local wargs
+        wargs=$(short_args "$pid")
+        warn "Parentless %s: PID %s — may be a server you started with & or nohup: %s" "$comm" "$pid" "$wargs"
+        grade_section "Claude" "warn"
+        add_fix "kill $pid" "parentless $comm — check it is not yours first: $wargs" risky
+      fi
     fi
   done <<< "$dev_procs"
 
@@ -937,9 +1005,56 @@ check_claude_ecosystem() {
   echo ""
   if (( ghost_groups > 0 || orphan_workers > 0 )); then
     crit "Found $ghost_groups ghost group(s), $orphan_workers orphaned worker(s)"
-  else
+  elif (( parentless == 0 )); then
     ok "$session_count active Claude session(s), no ghost processes"
   fi
+  if (( parentless > 0 )); then
+    warn "Found $parentless parentless process(es) or group(s) that may be yours — see above"
+  fi
+}
+
+# === SECTION 10: CLAUDE CODE CONFIG (~/.claude.json) ===
+# Sizes the global config Claude Code rewrites on every launch — the total, and
+# the projects carrying the bulk. The verdict (healthy / growing / cleanup) is
+# cc-chk --json's: cc-chk owns the size thresholds, so the two never disagree.
+# Runs without ps, so it reports even where the process check is skipped.
+config_unmeasured() {
+  # not measured must never render as HEALTHY (see grade_section's skip)
+  info "$1"; grade_section Config skip; (( SKIPPED_COUNT++ )) || true
+}
+
+check_claude_config() {
+  header "CLAUDE CODE CONFIG (~/.claude.json)"
+  local f="$HOME/.claude.json" jq=/usr/bin/jq ccchk status kb
+  [[ -x "$jq" ]] || jq=$(command -v jq) || { config_unmeasured "jq not found — ~/.claude.json not measured"; return 0; }
+  # a running session may be mid-write: validate, retry once, never abort
+  if ! "$jq" -e . "$f" >/dev/null 2>&1; then
+    sleep 0.2
+    "$jq" -e . "$f" >/dev/null 2>&1 || { config_unmeasured "~/.claude.json missing or mid-write — not measured"; return 0; }
+  fi
+  ccchk=$(command -v cc-chk) || { config_unmeasured "cc-chk not found — ~/.claude.json not judged"; return 0; }
+  read -r status kb <<< "$("$ccchk" --json 2>/dev/null | "$jq" -r '"\(.total_status) \(.total_kb)"' 2>/dev/null)"
+  case "$status" in
+    cleanup) crit "~/.claude.json is %d KB — cleanup needed" "$kb"; grade_section Config crit
+             add_fix "cc-chk" "~/.claude.json is $kb KB — see which projects carry it" manual ;;
+    growing) warn "~/.claude.json is %d KB — growing" "$kb"; grade_section Config warn
+             add_fix "cc-chk" "~/.claude.json is $kb KB and growing" manual ;;
+    healthy) ok "~/.claude.json is %d KB" "$kb" ;;
+    *)       config_unmeasured "cc-chk gave no verdict — ~/.claude.json not judged"; return 0 ;;
+  esac
+  # where the bulk sits, once it is worth explaining (not healthy) or with -v:
+  # the 3 largest top-level keys, then the 3 largest projects (every one with -v)
+  [[ "$status" != healthy ]] || $VERBOSE || return 0
+  "$jq" -r 'to_entries[] | [(.value | tostring | length), .key] | @tsv' "$f" 2>/dev/null \
+    | sort -rn | head -3 | while IFS=$'\t' read -r b key; do
+        [[ -n "$b" ]] && info "  key %s — %d KB" "$key" $(( (b + 1023) / 1024 ))
+      done
+  "$jq" -r '(.projects // {}) | to_entries[]
+      | [(.value | tostring | length), (.key | sub("/+$"; "") | split("/") | last)] | @tsv' "$f" 2>/dev/null \
+    | sort -rn | { $VERBOSE && cat || head -3; } | while IFS=$'\t' read -r b name; do
+        [[ -n "$b" ]] && info "  project %s — %d KB" "$name" $(( (b + 1023) / 1024 ))
+      done
+  return 0
 }
 
 # === REPORT CARD ===
@@ -1029,11 +1144,11 @@ apply_fixes() {
   # runaway from a build, so that call stays with the human.
   if (( ${#risky_idx[@]} > 0 )); then
     echo ""
-    echo -e "  ${YELLOW}${BOLD}Your call — live processes, matched only on CPU:${NC}"
+    echo -e "  ${YELLOW}${BOLD}Your call — live processes that may be yours (matched on CPU, or parentless without an MCP marker):${NC}"
     for i in "${risky_idx[@]}"; do
       printf "    %-22s ${DIM}← %s${NC}\n" "${FIX_CMD[$i]}" "${FIX_WHY[$i]}"
     done
-    echo -e "  ${DIM}Check what each one is before killing it — a build or encode looks identical here.${NC}"
+    echo -e "  ${DIM}Check what each one is before killing it — a build, an encode or a server you started looks identical here.${NC}"
   fi
 
   if (( ${#manual_idx[@]} > 0 )); then
@@ -1059,6 +1174,7 @@ print_report_card() {
   $RUN_AGENTS && _card_row "Launch Agents"    "$GRADE_Agents"
   $RUN_NET    && _card_row "Network"          "$GRADE_Network"
   $RUN_CLAUDE && _card_row "Claude Ecosystem" "$GRADE_Claude"
+  $RUN_CLAUDE && _card_row "Claude config"    "$GRADE_Config"
 
   echo -e "${BOLD}├────────────────────┴──────────────────────┤${NC}"
 
@@ -1118,10 +1234,13 @@ main() {
   if $RUN_CLAUDE; then
     (( HAVE_PS )) && check_claude_ecosystem \
       || skip_section "CLAUDE CODE ECOSYSTEM" Claude "ps"
+    check_claude_config
   fi
 
   print_report_card
-  $RUN_FIX && apply_fixes
+  # an `if`, not `$RUN_FIX && apply_fixes`: as the last command that returned
+  # false whenever --fix was absent, so every report exited 1
+  if $RUN_FIX; then apply_fixes; fi
 }
 
 main "$@"

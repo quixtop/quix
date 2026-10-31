@@ -12,7 +12,7 @@ curl -fsSL https://quixtop.com/i | sh -s -- shipped
 
 Invoke it as `/shipped` in Claude Code.
 
-List the last n FEATURES shipped as a table — owner smoke state · dep timestamp · feature · machine verdict — read from the project's deplog (docs/logs/deplogs.md, newest-first). n counts FEATURES, not deps; defaults to 25, and always rounds up to finish the day it lands on. Filter the rows with -v (machine-verified) or -u (unverified/unchecked). Add -w to render the interactive smoke-check widget instead of the table, whose reports file into docs/logs/verilog.md — bundles as -wu / -wv. Never edits the deplog, never re-derives from git. Triggers on /shipped [n], 'what shipped', 'what went out lately', 'features shipped', 'last few features'.
+List the last n features shipped (default 25) as a table from the project's deplog — smoke state, dep time, feature, machine verdict. -v / -u filter verified / unverified; -w opens the smoke-check widget. Read-only. Triggers on /shipped [n], 'what shipped', 'what went out lately', 'features shipped', 'last few features'.
 
 ## Source
 

@@ -1,15 +1,22 @@
 #!/usr/bin/env bash
 # (c) Shrix
 # author: shrix
-# clear-nvim-swap — remove Neovim swap files from the swap dir.
-# Safe by design: refuses to run while nvim is open (live swaps must
-# not be deleted), and supports a dry run. Clears stale swaps that
-# trigger the "W325: Ignoring swapfile" warning.
+# clear-nvim-swap — save and close running nvim sessions, then remove stale
+# Neovim swap files (the ones behind "E325: ATTENTION" and "W325: Ignoring
+# swapfile").
 #
-#   clear-nvim-swap                 delete stale swap files
-#   clear-nvim-swap -n | --dry-run  list what would go, delete nothing
-#   clear-nvim-swap -f | --force    delete even while nvim runs (risky)
-#   clear-nvim-swap -h | --help     this help
+# Each running nvim is shown — folder and open files — and closed only on
+# your y: its session is saved first (open with the printed `nvim -S <file>`),
+# then it quits. Never closed: an nvim with unsaved changes or a running
+# :terminal, or a suspended (Ctrl-Z) one. A swap file whose nvim still runs
+# is kept, so answering n is safe.
+#
+# Usage: clear-nvim-swap [-n|--dry-run|dry-run] [-y|--yes|yes] [-f|--force|force]
+#   -n, --dry-run   show sessions and swap files, close and delete nothing
+#   -y, --yes       close every closable session without asking
+#   -f, --force     skip the sessions and delete every swap file, live ones too
+#                   (a running nvim's swap is its crash-recovery data)
+#   -h, --help      this help
 set -euo pipefail
 
 # Trailing gap — one blank line after this script's output, TTY only, so piped
@@ -20,32 +27,82 @@ trap _gap EXIT
 # Colours + the `status` closing line (TTY-guarded).
 source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/proj-env.sh"
 
-SWAP_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/nvim/swap"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/nvim"
+SWAP_DIR="$STATE_DIR/swap"
+SESSION_DIR="$STATE_DIR/sessions"
+# Where nvim puts its default server sockets: <run dir>/nvim.$USER/<random>/nvim.<pid>.0
+RUN_DIRS=("${XDG_RUNTIME_DIR:-}" "${TMPDIR:-/tmp}")
 
 dry_run=false
+yes=false
 force=false
 for arg in "$@"; do
   case "$arg" in
-    -n|--dry-run) dry_run=true ;;
-    -f|--force)   force=true ;;
-    -h|--help)
-      cat <<EOF
-Usage: clear-nvim-swap [-n|--dry-run] [-f|--force]
-
-  Removes Neovim swap files in:
-    $SWAP_DIR
-
-  -n, --dry-run   List what would be removed, delete nothing.
-  -f, --force     Delete even if nvim is running (NOT recommended —
-                  a running nvim's swap is live crash-recovery data).
-  -h, --help      Show this help.
-
-By default it aborts if any nvim process is running.
-EOF
+    -n|--dry-run|dry-run) dry_run=true ;;
+    -y|--yes|yes)         yes=true ;;
+    -f|--force|force)     force=true ;;
+    -h|--help|help)
+      awk 'NR==1 { next } /^# \(c\)/ { next } /^# author:/ { next } /^#/ { sub(/^# ?/,""); print; next } { exit }' "$0"
       exit 0 ;;
     *) echo "clear-nvim-swap: unknown arg '$arg' (see --help)" >&2; exit 2 ;;
   esac
 done
+
+# Ask an nvim over its socket; a stopped or hung one is cut off after 3 s
+# (macOS has no `timeout`, so perl's alarm survives the exec instead).
+# --headless and no tty on stdin: on a terminal the client otherwise starts
+# probing it, garbling the reply and the screen.
+rpc() { perl -e 'alarm shift; exec @ARGV' 3 nvim --headless --server "$1" "${@:2}" </dev/null 2>/dev/null; }
+
+# True unless the PID is certainly gone: kill -0 also fails with "Operation
+# not permitted" on another user's live process (e.g. `sudo -E nvim`).
+alive() { local err; err=$(LC_ALL=C kill -0 "$1" 2>&1) && return 0; [[ "$err" != *"No such process"* ]]; }
+
+# Suspended (Ctrl-Z): the socket's nvim, or the TUI process in front of it.
+suspended() {
+  local ppid
+  [[ "$(ps -o stat= -p "$1" 2>/dev/null)" == T* ]] && return 0
+  ppid=$(ps -o ppid= -p "$1" 2>/dev/null | tr -d ' ')
+  [[ -n "$ppid" && "$(ps -o stat= -p "$ppid" 2>/dev/null)" == T* ]]
+}
+
+# The reply: "OK", number of :terminal buffers, folder, then one line per
+# buffer that matters — listed ones, any with unsaved changes, and loaded
+# files hidden from the list (a plugin's, which still hold a swap file):
+# "M <name>" when closing would lose work (unsaved changes, or text in a
+# listed, editable scratch buffer, which :mksession does not keep; a
+# read-only one such as :Man is not work), else "F <name>". The count comes
+# before the folder, whose name could hold a newline.
+INFO_EXPR='join(["OK", len(filter(getbufinfo(),{_,b->getbufvar(b.bufnr,"&buftype")=="terminal"})), getcwd()] + map(filter(getbufinfo(),{_,b->b.listed || b.changed || (b.loaded && !empty(b.name) && getbufvar(b.bufnr,"&buftype")=="")}),{_,b->((b.changed || (b.listed && b.loaded && getbufvar(b.bufnr,"&buftype")=~#"^no" && getbufvar(b.bufnr,"&modifiable") && getbufline(b.bufnr,1,2)!=[""])) ? "M " : "F ")..(empty(b.name)?"[No Name]":b.name)}),"\n")'
+
+# Can this nvim be closed? Sets $info (its reply) and, when not, $reason.
+check_session() {
+  local terms
+  info="" reason=""
+  if suspended "$2"; then
+    reason="suspended (Ctrl-Z) — resume it with 'fg' in its own terminal tab"; return 1
+  fi
+  info=$(rpc "$1" --remote-expr "$INFO_EXPR") || info=""
+  # Only a reply in the expected shape counts: a garbled one could hide
+  # unsaved changes, so it leaves the session open.
+  terms=$(sed -n 2p <<<"$info")
+  if [[ "$(sed -n 1p <<<"$info")" != OK || ! "$terms" =~ ^[0-9]+$ || -z "$(sed -n 3p <<<"$info")" ]]; then
+    reason="not responding (suspended or busy)"; return 1
+  fi
+  if grep -q '^M ' <<<"$info"; then
+    reason="has unsaved changes — save them in nvim first"; return 1
+  fi
+  if (( terms > 0 )); then
+    reason="has a running :terminal — close it in nvim first"; return 1
+  fi
+}
+
+# The PID that owns a swap file: block 0 starts with "b0" and holds the PID at
+# byte 24. Prints nothing when the header is not a swap header.
+swap_owner() {
+  [[ "$(head -c 2 "$1" 2>/dev/null)" == b0 ]] || return 0
+  od -An -tu4 -j24 -N4 "$1" 2>/dev/null | tr -d ' '
+}
 
 if [[ ! -d "$SWAP_DIR" ]]; then
   status warn "no swap dir at $SWAP_DIR — nothing to do"
@@ -54,6 +111,11 @@ fi
 
 shopt -s nullglob
 files=("$SWAP_DIR"/*.sw[a-p])
+socks=()
+me=${USER:-$(id -un)}
+for d in "${RUN_DIRS[@]}"; do
+  [[ -n "$d" ]] && socks+=("${d%/}/nvim.$me"/*/nvim.*.0)
+done
 shopt -u nullglob
 
 if (( ${#files[@]} == 0 )); then
@@ -61,36 +123,104 @@ if (( ${#files[@]} == 0 )); then
   exit 0
 fi
 
-echo "Swap files in $SWAP_DIR (${#files[@]}):"
+# ── 1. sessions: show each running nvim, close it on a y ────────────────────
+closed=0 kept=0
+if [[ "$force" == false ]]; then
+  # An interactive answer needs a terminal; without one only -y closes anything.
+  can_ask=false
+  [[ -t 0 ]] && can_ask=true
+  declare -A seen=()
+  for sock in "${socks[@]}"; do
+    # Only our own sockets: under a shared /tmp another user could plant one.
+    [[ -S "$sock" && -O "$sock" ]] || continue
+    pid=${sock##*/nvim.}; pid=${pid%.0}
+    [[ -z "${seen[$pid]:-}" ]] || continue   # XDG_RUNTIME_DIR and TMPDIR may be one folder
+    seen[$pid]=1
+    alive "$pid" || continue   # leftover socket of a dead nvim
+
+    echo "nvim $pid"
+    if check_session "$sock" "$pid"; then ok=0; else ok=1; fi
+    if [[ -n "$info" && "$(sed -n 1p <<<"$info")" == OK ]]; then
+      echo "    folder  $(sed -n 3p <<<"$info")"
+      sed -n '4,$p' <<<"$info" | while read -r flag name; do
+        if [[ "$flag" == M ]]; then echo "    file    $name  (unsaved changes)"; else echo "    file    $name"; fi
+      done
+    fi
+    if (( ok != 0 )); then
+      echo "    $reason; left open"
+      kept=$((kept + 1)); continue
+    fi
+    if [[ "$dry_run" == true ]]; then
+      echo "    would ask to save the session and close it"
+      continue
+    fi
+
+    if [[ "$yes" == true ]]; then
+      ans=y
+    elif [[ "$can_ask" == true ]]; then
+      read -r -p "    save this session and close it? [y/N] " ans || ans=""
+    else
+      echo "    no terminal to ask on — left open (-y closes without asking)"
+      ans=n
+    fi
+    if [[ ! "$ans" =~ ^[Yy]$ ]]; then
+      echo "    left open"
+      kept=$((kept + 1)); continue
+    fi
+    # The prompt may have waited a long time: check again before closing.
+    if [[ "$yes" == false ]] && ! check_session "$sock" "$pid"; then
+      echo "    changed while waiting: $reason; left open"
+      kept=$((kept + 1)); continue
+    fi
+
+    mkdir -p "$SESSION_DIR"
+    session="$SESSION_DIR/$(date +%Y%m%d-%H%M%S)-$pid.vim"
+    esc=${session//\\/\\\\}; esc=${esc//\"/\\\"}
+    rpc "$sock" --remote-expr "execute(\"mksession! \" .. fnameescape(\"$esc\"))" >/dev/null || true
+    if [[ ! -s "$session" ]]; then
+      echo "    could not save the session — left open"
+      kept=$((kept + 1)); continue
+    fi
+    # <Cmd> runs :qa without typing ":", so a user mapping of ":" can't hijack it.
+    rpc "$sock" --remote-send '<C-\><C-N><Cmd>qa<CR>' >/dev/null || true
+    for _ in $(seq 50); do alive "$pid" || break; sleep 0.1; done
+    if alive "$pid"; then
+      echo "    did not quit within 5 s — left open (session saved: $session)"
+      kept=$((kept + 1)); continue
+    fi
+    echo "    closed — reopen with: nvim -S $(printf '%q' "$session")"
+    closed=$((closed + 1))
+  done
+fi
+
+# ── 2. swap files: remove those whose nvim is gone ──────────────────────────
+stale=() live=()
 for f in "${files[@]}"; do
-  echo "  - $(basename "$f")"
+  [[ -e "$f" ]] || continue   # its nvim just quit and removed it
+  owner=$(swap_owner "$f") || owner=""   # it may vanish mid-read
+  if [[ "$force" == false ]] && { [[ -z "$owner" ]] || alive "$owner"; }; then
+    live+=("$f")
+  else
+    stale+=("$f")
+  fi
 done
 
-# Preview mode deletes nothing, so it is always safe — check it first.
+echo "Swap files in $SWAP_DIR:"
+for f in "${stale[@]}"; do echo "  - $(basename "$f")"; done
+for f in "${live[@]}"; do echo "  = $(basename "$f")  (its nvim still runs, or no owner found — kept)"; done
+
 if [[ "$dry_run" == true ]]; then
-  status warn "dry run — nothing deleted; drop -n to remove them"
+  status warn "dry run — nothing closed or deleted; ${#stale[@]} swap file(s) would go, ${#live[@]} kept"
   exit 0
 fi
 
-# Actual deletion: never remove a live swap out from under a running nvim.
-# Name the PIDs, their STATE and their file rather than just "nvim is running".
-# A `T` (suspended, Ctrl-Z'd) nvim has no visible window, so a bare warning
-# sends the user hunting for a tab that isn't there — measured 19Aug26.
-if pids=$(pgrep -x nvim 2>/dev/null) && [[ -n "$pids" ]] && [[ "$force" == false ]]; then
-  status warn "nvim is running — its swap files are live crash-recovery data"
-  # shellcheck disable=SC2046   # the pid list is meant to split into ps -p arguments
-  ps -o pid=,stat=,args= -p $(echo "$pids" | tr '\n' ',' | sed 's/,$//') 2>/dev/null |
-    while read -r pid stat args; do
-      case "$stat" in
-        T*) note="suspended (Ctrl-Z) — resume with 'fg' in its own terminal tab" ;;
-        *)  note="active" ;;
-      esac
-      printf '    %-7s %-5s %s\n            └─ %s\n' "$pid" "$stat" "${args:0:52}" "$note"
-    done
-  printf '\n    Save and quit those, then re-run. --force overrides (may lose\n'
-  printf '    unsaved buffers).\n\n'
-  exit 1
+msg="removed ${#stale[@]} swap file(s)"
+(( closed > 0 )) && msg+=", closed $closed nvim session(s)"
+(( ${#live[@]} > 0 )) && msg+=", kept ${#live[@]} of running nvims"
+(( kept > 0 )) && msg+=" — $kept nvim(s) left open"
+if (( ${#stale[@]} == 0 )); then
+  status warn "$msg"
+  exit 0
 fi
-
-rm -f -- "${files[@]}"
-status ok "removed ${#files[@]} swap file(s) from $SWAP_DIR"
+rm -f -- "${stale[@]}"
+status ok "$msg"

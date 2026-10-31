@@ -12,7 +12,7 @@ curl -fsSL https://quixtop.com/i | sh -s -- start
 
 Invoke it as `/start` in Claude Code.
 
-Establish comprehensive project context by analyzing codebase patterns, architecture, and conventions. Use when onboarding to a new/unfamiliar codebase or (re)building a mental model of a project.
+A project at a glance — unread handoff, where the last session stopped, git, open work, last push and ship, stack, run commands, services by env-var name, docs — then the next move; `--deep` adds a code map. Use when opening, returning to or onboarding onto a project. NOT a past-session search (/recall) or the task list (/proj-tasks).
 
 ## Source
 

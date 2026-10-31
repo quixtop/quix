@@ -1,4 +1,6 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# (c) Shrix
+# author: shrix
 # pushlog.sh — deterministic pushlog entry generator
 # --------------------------------------------------
 # Captures git diff state as a structured stdout blob for the LLM to
@@ -7,12 +9,21 @@
 #
 # Usage:
 #   ./pushlog.sh                # normal run — emit structured blob
+#   ./pushlog.sh --verify       # secret-pattern scan of the newest entries
+#   ./pushlog.sh -h | --help | help
 #
 # Exit codes:
-#   0 — success (blob emitted, first-run setup done, or nothing to log)
-#   1 — precondition failure (not in a git repo, corrupt state, etc.)
+#   0 — success (blob emitted, first-run setup done, nothing to log, or a clean scan)
+#   1 — precondition failure (not in a git repo, corrupt state, etc.),
+#       or --verify found a possible secret or could not complete the scan
 
 set -e
+_gap() { [ -t 1 ] && printf '\n'; return 0; }
+trap _gap EXIT
+case "${1:-}" in -h|--help|help)
+    awk 'NR==1 { next } /^# \(c\)/ { next } /^# author:/ { next } /^#/ { sub(/^# ?/,""); print; next } { exit }' "$0"
+    exit 0 ;;
+esac
 
 # ============================================================
 # Configuration
@@ -126,9 +137,8 @@ EOF
 #   - pushlog: extracts from the first `**...**` title line up to the next
 #     `---` separator — i.e. only the topmost (newest) entry. Older entries
 #     below the first separator are skipped.
-#   - chatlog: scans the full file. Chatlog uses `  > **title**` indented
-#     titles (not `^**`) and has no `---` separators, so structural extraction
-#     is unreliable. Full-file scan trades a few false positives on old
+#   - chatlog: scans the full file. Chatlog has no `---` separators between
+#     entries, so structural extraction is unreliable. Full-file scan trades a few false positives on old
 #     entries for guaranteed coverage of the freshly-written one.
 scan_log_for_secrets() {
     local file="$1"
@@ -149,22 +159,26 @@ scan_log_for_secrets() {
 
     # Known secret prefixes / formats. Conservative — chosen so prose like
     # "Bearer auth" or "AKIA" alone won't trip; we require key-shaped suffixes.
-    local patterns='(sk-ant-[A-Za-z0-9_-]{20,})'
-    patterns="$patterns"'|(sk-[A-Za-z0-9_-]{20,})'
-    patterns="$patterns"'|(gh[pousr]_[A-Za-z0-9]{30,})'
-    patterns="$patterns"'|(xox[baprs]-[A-Za-z0-9-]{20,})'
-    patterns="$patterns"'|(AKIA[0-9A-Z]{16})'
-    patterns="$patterns"'|(AIza[0-9A-Za-z_-]{35})'
-    patterns="$patterns"'|(eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+)'
+    # The first line is a verbatim copy of the Claude hooks' list
+    # (~/.claude/hooks/secret-patterns.sh); push keeps the same copy. Update all
+    # three together — ~/.agents/tests/skills/pushlog/test_secret_patterns.sh
+    # fails when one falls behind. pushlog's own extras: Bearer tokens, and
+    # other dashed sk- keys of 20+ characters that no named rule covers,
+    # guarded like the hook's sk- rule so "task-list" prose passes.
+    local patterns='-----BEGIN (RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY( BLOCK)?-----|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|github_pat_[0-9A-Za-z_]{20,}|gh[pousr]_[0-9A-Za-z]{20,}|xox[baprs]-[0-9A-Za-z-]{10,}|sk-ant-[A-Za-z0-9_-]{20,}|sk-proj-[A-Za-z0-9_-]{20,}|(^|[^a-z]|\\[nrt]|%[0-9A-Fa-f]{2}|\[[0-9;]*m)sk-[A-Za-z0-9]{32,}|sk-(svcacct|admin)-[A-Za-z0-9_-]{20,}T3BlbkFJ[A-Za-z0-9_-]{20,}|(sk|rk)_live_[0-9A-Za-z]{16,}|SG\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}|glpat-[0-9A-Za-z_-]{20,}|npm_[0-9A-Za-z]{36,}|AIza[0-9A-Za-z_-]{35}|GOCSPX-[0-9A-Za-z_-]{20,}|eyJ[A-Za-z0-9_-]{15,}\.eyJ[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{30,}|sk-or-v1-[0-9a-f]{64}|sk-lf-[0-9a-f]{8}-[0-9a-f-]{12,}'
     patterns="$patterns"'|(Bearer [A-Za-z0-9_.-]{20,})'
-    patterns="$patterns"'|(-----BEGIN [A-Z ]*PRIVATE KEY-----)'
+    patterns="$patterns"'|((^|[^a-z])sk-[A-Za-z0-9_-]{20,})'
 
-    # grep -c prints the match count to stdout and exits 1 on zero matches.
-    # We swallow that exit (and any grep crash) by falling back to count=0.
-    # Net effect: a broken grep silently passes the scan rather than erroring.
-    local count
-    count=$(printf '%s' "$entry" | grep -cE "$patterns" 2>/dev/null) || count=0
-    if [ "$count" -gt 0 ]; then
+    # grep -c prints the match count and exits 1 on zero matches — that is a
+    # clean scan. Exit 2+ means grep itself failed: the scan did not run, so it
+    # fails CLOSED (a security gate must never pass on a broken check).
+    local count grc=0
+    count=$(printf '%s' "$entry" | grep -cE -e "$patterns" 2>/dev/null) || grc=$?   # -e: the list starts with "-----"
+    if [ "$grc" -gt 1 ]; then
+        printf '%b⚠️  Secret-pattern scan of %s could not run (grep exit %d) — treat it as NOT clean.%b\n' "$RED" "$label" "$grc" "$NC" >&2
+        return 1
+    fi
+    if [ "${count:-0}" -gt 0 ]; then
         printf '%b⚠️  POSSIBLE SECRET LEAK in %s — %d line(s) matched a known secret pattern.%b\n' "$RED" "$label" "$count" "$NC" >&2
         printf '%b   File: %s%b\n' "$RED" "$file" "$NC" >&2
         if [ "$label" = "chatlog" ]; then
@@ -207,8 +221,8 @@ filter_meta_files() {
             # well-known credential filenames.
             # ⚠️ These two rungs match a NAME, not a format — unlike .pem/.key/.env/.tfvars above,
             # which identify a file that IS a credential store. So a documentation extension is
-            # exempted: `secrets.md` is prose ABOUT secrets (cf-worx keeps docs/secrets.md — the
-            # names of every secret and which Worker binds it, values never recorded), and
+            # exempted: `secrets.md` is prose ABOUT secrets (e.g. docs/secrets.md in a project — the
+            # names of every secret and what binds it, values never recorded), and
             # redacting it produced a vague, useless bullet on every push that touched it while
             # protecting nothing. A real credential store is never a .md.
             if (base ~ /^secrets?\./ && base !~ /\.(md|txt|rst|adoc)$/) return 1
@@ -351,7 +365,11 @@ else
     # Normal case: prefer commits-ahead-of-upstream, fall back to working tree
     if git rev-parse '@{u}' >/dev/null 2>&1; then
         AHEAD=$(git rev-list --count '@{u}..HEAD' 2>/dev/null || echo "0")
-        if [ "$AHEAD" -gt 0 ]; then
+        if [ "$AHEAD" -gt 0 ] && working_tree_has_changes; then
+            # Commits ahead AND uncommitted work: `push` commits the working tree
+            # too, so diff upstream against the working tree (untracked added below).
+            DIFF_RANGE='@{u}'
+        elif [ "$AHEAD" -gt 0 ]; then
             DIFF_RANGE='@{u}..HEAD'
         elif working_tree_has_changes; then
             DIFF_RANGE="HEAD"
@@ -376,11 +394,11 @@ fi
 CHANGED_FILES_RAW=$(git diff --name-status "$DIFF_RANGE" 2>/dev/null || true)
 DIFF_STAT=$(git diff --shortstat "$DIFF_RANGE" 2>/dev/null || true)
 
-# In working-tree mode (DIFF_RANGE=HEAD or pre-initial-commit), also include
+# In working-tree mode (DIFF_RANGE=HEAD, @{u} or pre-initial-commit), also include
 # untracked files — they're exactly what the user is about to commit/push.
 # Not applicable when DIFF_RANGE is a commit range (@{u}..HEAD etc) because
 # untracked files are irrelevant to already-committed history.
-if [ "$DIFF_RANGE" = "HEAD" ] || [ "$DIFF_RANGE" = "$EMPTY_TREE" ]; then
+if [ "$DIFF_RANGE" = "HEAD" ] || [ "$DIFF_RANGE" = '@{u}' ] || [ "$DIFF_RANGE" = "$EMPTY_TREE" ]; then
     UNTRACKED=$(git ls-files --others --exclude-standard 2>/dev/null | awk 'NF { print "A\t" $0 }')
     if [ -n "$UNTRACKED" ]; then
         if [ -n "$CHANGED_FILES_RAW" ]; then

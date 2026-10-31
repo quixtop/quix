@@ -1,16 +1,25 @@
 ---
 name: todo
 author: shrix
-description: "(shrix) Personal todo list manager backed by a configurable file (default ~/md/todo.md). Use when the user runs /todo to view, add, remove, complete/un-complete items, clear done items, or set the file path. Full subcommand grammar (prefix shorthands, -X/--XYZ flags, comma/range batches) is in the skill body. NOT for project task tracking (use tasks)."
+description: "(shrix) Personal todo list manager backed by a configurable file (default ~/md/tasks.md, folders as ## headings). Use when the user runs /todo to view, add, remove, complete/un-complete items, clear done items, or set the file path. NOT for project task tracking (use proj-tasks)."
 metadata:
-  version: "1.0"
+  version: "2.0"
   category: status
 effort: low
 ---
 
 # Todo List (`/todo`)
 
-Personal todo manager. Default file is `~/md/todo.md`; the path can be reconfigured persistently.
+Personal todo manager. Default file is `~/md/tasks.md`; the path can be reconfigured persistently. The ctxbar mod's task pane edits the same file through `todo.py --json` (its contract is ctxbar's `docs/spec/ctxbar-task-panel.md` § 4.7). The mod also registers `/todo`: typed bare it opens or closes the pane; with words it runs this script with them and shows its output itself.
+
+## File format
+
+The contract both `/todo` and the task pane keep (ctxbar spec § 4.4):
+- A task is `- [ ] title` or `- [x] title` (`- [X]` reads as done too), plus any lines indented under it (two spaces or more, or a tab; not blank): they are the rest of its title, so a task can take several lines, and every edit moves it whole. A blank line ends a task; every other line is kept as written.
+- `## Name` starts a folder that runs to the next `## `; lines above the first heading are the top folder.
+- The file is read split on `\n` only, so CRLF lines and the final newline survive every edit; a BOM at the start is read past and kept.
+- Every edit locks `<file>.lock`, copies the file to `<file>.prev` and writes atomically; a removed line goes to `<file>.deleted`. A write that fails leaves the file as it was and no temp file behind (`.prev` is put in place only once the new file is written, just before it replaces the old). A file that is a symlink is written through the link, which stays.
+- `add` takes one line per task, 1–500 characters: text with a line break, a tab or another control character is refused.
 
 ## Commands
 
@@ -24,12 +33,13 @@ Personal todo manager. Default file is `~/md/todo.md`; the path can be reconfigu
 | `/todo clear` | Wipe all done items |
 | `/todo path` | Show the current todo file path |
 | `/todo path <new-path>` | Set the todo file path (persistent) |
-| `/todo path reset` | Restore the default `~/md/todo.md` |
-| `/todo -h`, `/todo --help` | Show help — full command listing with examples |
+| `/todo path reset` | Restore the default `~/md/tasks.md` |
+| `todo.py migrate` / `migrate --undo` | Move an old `~/md/todo.md` into `~/md/tasks.md` under `## gen` (once); undo while nothing was edited |
+| `/todo help`, `-h`, `--help` | Show help — full command listing with examples |
 
 **Numbering:** items are **continuously numbered** — pending first (1..P), then done (P+1..P+D). All number-taking commands (`remove`, `completed`, `uncheck`) use this unified scheme. `remove N` works on any item; `completed N` errors if N is already done; `uncheck N` errors if N is still pending. Done items render with ✅ right-aligned in a straight vertical column based on the longest done-item text, so the checkmarks line up regardless of item length.
 
-**Shorthand:** any non-empty prefix of the subcommand works — `a`/`ad`/`add`, `r`/`re`/`rem`/.../`remove`, `c`/`co`/.../`completed`, `cl`/`cle`/.../`clear`, `p`/`pa`/`pat`/`path`, `u`/`un`/.../`uncheck`. **Prefix collision note:** `c` resolves to `completed` (checked first in dispatch to preserve muscle memory); to reach `clear` via prefix matching, you need at least `cl`. Other canonicals have unique first letters (a/r/p/u). **Single-char alias `x` → `clear`:** since `clear`'s natural letter `c` collides with `completed`, the short option `-x` is dedicated to `clear`. So `! todo -x` wipes all done items. Pass whatever the user typed through to the script unchanged; the script resolves the prefix itself.
+**Shorthand:** any non-empty prefix of the subcommand works — `a`/`ad`/`add`, `r`/`re`/`rem`/.../`remove`, `c`/`co`/.../`completed`, `cl`/`cle`/.../`clear`, `p`/`pa`/`pat`/`path`, `u`/`un`/.../`uncheck`. **Prefix collision note:** `c` resolves to `completed` (checked first in dispatch); to reach `clear` via prefix matching, you need at least `cl`. Other canonicals have unique first letters (a/r/p/h/u). **Single-char alias `x` → `clear`:** since `clear`'s natural letter `c` collides with `completed`, the short option `-x` is dedicated to `clear`. So `! todo -x` wipes all done items. Pass whatever the user typed through to the script unchanged; the script resolves the prefix itself.
 
 **Flag syntax (POSIX/GNU-aligned):**
 - `-X` — single dash + **exactly one character** (POSIX short option): `-a`, `-r`, `-c`, `-p`, `-h`, `-u` (uncheck), `-x` (clear)
@@ -38,7 +48,11 @@ Personal todo manager. Default file is `~/md/todo.md`; the path can be reconfigu
 
 The echo line always shows the canonical resolved form regardless of input style, so `/todo -a item1`, `/todo --add item1`, `/todo a item1`, and `/todo add item1` all produce byte-identical output.
 
-**Configuration:** the active path is stored in `~/.agents/skills/todo/config` (one line, just the absolute path). Absent → default (`~/md/todo.md`) is used. `path reset` deletes the config file.
+**Configuration:** the active path is stored in `~/.agents/skills/todo/config` (one line, just the absolute path). Absent → default (`~/md/tasks.md`) is used. `path reset` deletes the config file. While `~/md/tasks.md` is missing and `~/md/todo.md` holds the tasks, every command but `help`, `path` and `migrate` says to run `migrate` and changes nothing; with `~/md/tasks.md.pre-folders` there too, they say to resolve it by hand. `migrate` refuses a `todo.md` or `tasks.md` that is a link.
+
+**Folders:** with a `## ` heading in the file, the list is grouped under folder names (done items carry `· folder`), `add` goes to the first named folder, and echoes name the tasks (`› completed 2 (Buy milk)`). Without one it looks and works exactly as before.
+
+**Restore:** `~/md/tasks.md.prev` is the file before the last edit; `~/md/tasks.md.deleted` keeps every removed line under a timestamp; `~/md/tasks.md.pre-folders` is the file before the migration.
 
 **Batching:** use `,` to separate multiple items or numbers in one command. Examples:
 - `/todo add Buy milk, Call mom, Write skill`
@@ -57,7 +71,7 @@ For `remove`/`completed`/`uncheck`, all numbers are resolved against the **curre
 
 **Known limitation:** because `,` is the batch separator, you cannot add an item whose text contains a comma — `add Hello, world` creates two items, not one.
 
-Numbers refer to items in the most recently displayed list (pending 1..P, done P+1..P+D).
+Numbers are worked out from the file when the command runs (pending 1..P, done P+1..P+D) — the numbering a list printed now would show. If the task pane or another session changed the file since your last list, list again before using a number.
 
 ## Execution
 
@@ -80,7 +94,7 @@ When executing `/todo`, output **ONLY** the script's stdout.
 - ❌ No explanations of what happened
 - ✅ Just the raw stdout from the script, as-is
 
-This rule **overrides** the explanatory output style for this skill only. The user explicitly requested minimal output: "just that list should appear, nothing else".
+This rule **overrides** the explanatory output style for this skill only: just the list, nothing else.
 
 ## Example outputs
 
@@ -118,7 +132,7 @@ Empty state (no echo for bare list):
 **ToDo** (0 items) — empty
 ```
 
-Errors (no echo — the error line is the entire response):
+Errors (no echo — the ❌ line is the whole response; exit 1):
 ```
-❌ No pending item #99 (list has 2 pending)
+❌ No item #99 (list has 3 items)
 ```

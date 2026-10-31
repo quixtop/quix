@@ -14,21 +14,22 @@
 #   ./fido.sh -t "py,js,css"     - Custom file types filter
 #   ./fido.sh -v                 - Show actual diff lines instead of counts
 # 
-# Auto-detect searches: ../BACKUP/{project}/last → last_git → tmp/backup/last → tmp/backup/last_git
-
-# Ensure we operate from repo root regardless of invocation dir
+# Auto-detect: the newest of last, last_git and their labelled forms
+# (last_t-…, last_git-<tag>) in $BACKUP_DIR (default ../BACKUP/{project}),
+# then tmp/backup/last → tmp/backup/last_git
 
 # Trailing gap — one blank line after this script's output, TTY only, so piped
 # or redirected output stays exactly the data. Fires on every exit path.
 _gap() { [ -t 1 ] && printf '\n'; return 0; }
 trap _gap EXIT
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-# If already in a project root (skill-based invocation), use pwd instead
-if [ -d ".git" ] || [ -d "src" ] || [ -f "package.json" ] || [ -f "pyproject.toml" ]; then
+# Operate from the project root: inside a git checkout ONLY its top level — a
+# nested package with its own package.json or src/ is not the root (push's
+# rule; a wrong root once put a backup inside the repo) — else this folder.
+if ! REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"; then
     REPO_ROOT="$(pwd)"
 fi
 PROJECT_NAME="$(basename "$REPO_ROOT")"
+INVOKE_DIR="$PWD"     # folders named on the command line are read from here
 cd "$REPO_ROOT" || exit
 
 # Source common project detection
@@ -54,8 +55,8 @@ show_help() {
     echo "=============================="
     echo
     echo "USAGE:"
-    echo "  ${BLUE}./fido.sh${NC}                    - Auto-detect backup vs current directory"
-    echo "  ${BLUE}./fido.sh${NC} dir1               - Compare dir1 vs current directory"
+    echo "  ${BLUE}./fido.sh${NC}                    - Auto-detect backup vs the project root"
+    echo "  ${BLUE}./fido.sh${NC} dir1               - Compare dir1 vs the folder you run it from"
     echo "  ${BLUE}./fido.sh${NC} dir1 dir2          - Compare dir1 vs dir2"
     echo "  ${BLUE}./fido.sh${NC} -h|--help          - Show this help"
     echo "  ${BLUE}./fido.sh${NC} -r dir1 [dir2]     - Reverse comparison (current vs dir1)"
@@ -78,9 +79,11 @@ show_help() {
     echo "  ./fido.sh -t \"js\" dir1 dir2           ${GREEN}# JS-only comparison${NC}"
     echo "  ./fido.sh -v tmp/backup/ver115_git     ${GREEN}# Show actual diff content${NC}"
     echo
-    echo "AUTO-DETECT SEARCH ORDER:"
-    echo "  ../BACKUP/\${project}/last → ../BACKUP/\${project}/last_git"
-    echo "  → tmp/backup/last → tmp/backup/last_git"
+    echo "AUTO-DETECT:"
+    echo "  the newest of last, last_git, last_t-… and last_git-<tag> in \$BACKUP_DIR"
+    echo "  (default ../BACKUP/\${project}; a relative BACKUP_DIR is read from the"
+    echo "  project root), then tmp/backup/last → tmp/backup/last_git"
+    echo "  Folders you name are read from the folder you run fido in."
     exit 0
 }
 
@@ -267,29 +270,39 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Folders you name are read from where you ran fido, not from the project root:
+# go back there and keep the names as typed (the output splits paths on spaces,
+# and shows them relative, as you gave them)
+if [[ -n $dir1 ]]; then cd "$INVOKE_DIR" || exit; fi
+
 # Set directories to compare based on provided arguments and flags
 if [[ -n $dir1 && -n $dir2 ]]; then
     # Two directories specified
     : # dir1 and dir2 already set
 elif [[ -n $dir1 ]]; then
-    # One directory specified: compare it vs current directory
+    # One directory specified: compare it vs the folder fido was run from
     dir2="."
 else
     # No directories specified: auto-detect backup vs current directory
-    PROJECT_NAME=$(basename "$(pwd)")
-    BACKUP_BASE="../BACKUP/${PROJECT_NAME}"
-    
+    BACKUP_BASE="${BACKUP_DIR:-../BACKUP/${PROJECT_NAME}}"
+    # push and tag write last, last_git, last_t-… and last_git-<tag>: the newest
+    # wins. A glob, not find: the folder and its entries may be links.
+    newest="" ; newest_m=0
+    for d in "$BACKUP_BASE"/last "$BACKUP_BASE"/last_*; do
+        [ -d "$d" ] || continue
+        m=$(stat -L -f %m "$d" 2>/dev/null) || continue
+        if [ "$m" -gt "$newest_m" ]; then newest_m=$m; newest=$d; fi
+    done
+
     dir2="."
-    if [ -d "${BACKUP_BASE}/last" ]; then
-        dir1="${BACKUP_BASE}/last"
-    elif [ -d "${BACKUP_BASE}/last_git" ]; then
-        dir1="${BACKUP_BASE}/last_git"
+    if [ -n "$newest" ]; then
+        dir1="$newest"
     elif [ -d "tmp/backup/last" ]; then
         dir1="tmp/backup/last"
     elif [ -d "tmp/backup/last_git" ]; then
         dir1="tmp/backup/last_git"
     else
-        echo "No backup found in ${BACKUP_BASE}/last, ${BACKUP_BASE}/last_git, tmp/backup/last, or tmp/backup/last_git"
+        echo "No backup found in ${BACKUP_BASE}/last*, tmp/backup/last, or tmp/backup/last_git"
         exit 1
     fi
 fi
@@ -347,8 +360,8 @@ show_spinner() {
 }
 
 # Unified streaming processor
-temp_dir="/tmp/fido_$$"
-mkdir -p "$temp_dir"
+temp_dir=$(mktemp -d "${TMPDIR:-/tmp}/fido.XXXXXX") || { echo "✗ fido: cannot create a temp dir" >&2; exit 1; }
+trap 'rm -rf "$temp_dir"; _gap' EXIT
 done_marker="$temp_dir/done"
 found_marker="$temp_dir/found"
 
@@ -417,6 +430,8 @@ if [[ $SHOW_DIFFS -eq 1 ]]; then
             if [ -f "$done_marker" ]; then
                 break 2
             fi
+            # the producer died without writing its done marker: stop waiting
+            kill -0 "$background_pid" 2>/dev/null || [ -f "$meta_file" ] || break 2
             sleep 0.05
         done
 

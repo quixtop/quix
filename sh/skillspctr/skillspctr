@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# (c) Shrix
+# author: shrix
+# skillspctr — thin wrapper around `skillspector scan`.
+#
+#   skillspctr <path|url> [extra skillspector args...]
+#
+# Always runs a static scan (`scan --no-llm`, no API key required) with OSV.dev
+# unreachable (no dependency name leaves the machine), and decides
+# `--recursive` automatically from the shape of <path>:
+#
+#   * directory containing SKILL.md directly        -> single skill   (no --recursive)
+#   * directory whose subdirs contain SKILL.md      -> skill collection (--recursive)
+#   * a .md file / .zip / git URL / file URL        -> scanned as-is   (no --recursive)
+#
+# Anything after <path> is forwarded verbatim to skillspector, e.g.
+#   skillspctr ./my-skill -f json -o report.json
+#
+# Note: kept bash-3.2 safe (macOS default) — no arrays, no `set -u`.
+
+
+# Trailing gap — one blank line after this script's output, TTY only, so piped
+# or redirected output stays exactly the data. Fires on every exit path.
+_gap() { [ -t 1 ] && printf '\n'; return 0; }
+trap _gap EXIT
+# help from the header above; a bare `help` only when no path of that name exists
+case "${1:-}" in -h|--help|help)
+  if [ "$1" != help ] || { [ "$#" -eq 1 ] && [ ! -e help ]; }; then
+    awk 'NR==1 { next } /^# \(c\)/ { next } /^# author:/ { next } /^#/ { sub(/^# ?/,""); print; next } { exit }' "$0"
+    exit 0
+  fi ;;
+esac
+if [ "$#" -lt 1 ]; then
+  echo "usage: skillspctr <path-or-url> [extra skillspector args...]" >&2
+  exit 2
+fi
+
+target=$1
+shift
+
+recursive=
+if [ -d "$target" ] && [ ! -e "$target/SKILL.md" ]; then
+  # Not a skill itself — recurse if any immediate subdir looks like a skill.
+  for sub in "$target"/*/; do
+    [ -d "$sub" ] || continue   # skip the literal glob when there are no subdirs
+    if [ -f "${sub}SKILL.md" ]; then
+      recursive=--recursive
+      break
+    fi
+  done
+fi
+
+if [ -n "$recursive" ]; then
+  echo "skillspctr: '$target' -> collection (recursive, static)" >&2
+else
+  echo "skillspctr: '$target' -> single (static)" >&2
+fi
+echo "skillspctr: OSV.dev lookup blocked — known-vulnerable dependencies come from skillspector's built-in list only (full check: /secscan agents)" >&2
+
+# Every proxy points at a closed local port, so skillspector's OSV.dev lookup (httpx follows these) fails at once and
+# no dependency name leaves the machine. A URL target's own host bypasses it, so fetching the target still works.
+host=
+case "$target" in
+  http://*|https://*) host=${target#*://}; host=${host%%/*}; host=${host##*@}; host=${host%%:*} ;;
+esac
+dead=http://127.0.0.1:9
+HTTPS_PROXY=$dead https_proxy=$dead HTTP_PROXY=$dead http_proxy=$dead ALL_PROXY=$dead all_proxy=$dead \
+  NO_PROXY=$host no_proxy=$host skillspector scan "$target" --no-llm $recursive "$@"

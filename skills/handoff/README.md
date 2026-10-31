@@ -12,7 +12,7 @@ curl -fsSL https://quixtop.com/i | sh -s -- handoff
 
 Invoke it as `/handoff` in Claude Code.
 
-Use when continuing this work in a fresh session that cannot inherit the current context — CLI to the Desktop app, a different agent on this machine, or another machine/the web app IF the project folder is synced there. Writes a disposable, self-deleting HANDOFF.md at the project root for a cold resume; `/handoff <hint>` puts that item first in Next Steps. Not for mirroring a live session you keep open — use Remote Control.
+Move work to any fresh session that cannot inherit this context — a new session on this machine (CLI, Desktop, IDE), a Projects thread, another agent or machine. Writes a self-deleting HANDOFF.md (`/handoff <topic>` scopes it to that topic), recovers compacted turns, and cold-read-tests it. NOT for mirroring a live session you keep open — use Remote Control.
 
 ## Source
 

@@ -1,0 +1,320 @@
+#!/usr/bin/env python3
+# (c) Shrix
+# author: shrix
+# perm-asks — count the permission prompts Claude Code sessions showed you.
+#
+# Reads every session and subagent transcript under ~/.claude/projects
+# (read-only) and
+# counts, per tool call, whether you were asked: allowed once, rejected, or
+# answered "always" without a matching rule. Blocks (hook, classifier, safety
+# check) are counted apart. AskUserQuestion / ExitPlanMode are questions, not
+# permission prompts, and are listed apart. Sessions under /tmp are skipped.
+#
+# Usage: perm-asks [-d <days>] [-s <when>] [-n <top>] [-v]
+#   With no -d or -s, the counts split at the last commit that changed
+#   ~/.claude/settings.json: "after" runs from it to now, "before" covers the
+#   same length of time before it (at most 7 days), and the top asks list
+#   only "after" — what still asks. No such commit → the last 3 days.
+#   -d, --days <n>    window, last n days; no split unless -s is given
+#   -s, --split <t>   split at t instead, ISO local time (2026-10-26T13:00)
+#   -n, --top <n>     rows in the top-asks lists (default 10)
+#   -v, --verbose     one example command per row, cut to 120 characters;
+#                     only safe shapes are shown (program, subcommand, flags,
+#                     paths, LAN addresses, URL hosts) — every other value is …
+#   -h, --help        this help
+import atexit, collections, datetime as dt, glob, json, os, re, shlex, subprocess, sys, time
+
+atexit.register(lambda: sys.stdout.isatty() and print())
+
+QUESTIONS = {"AskUserQuestion", "ExitPlanMode"}
+HOME = os.path.expanduser("~")
+SETTINGS_REPO = f"{HOME}/.claude"
+BEFORE_CAP_DAYS, FALLBACK_DAYS, MIN_CALLS = 7, 3, 200
+
+
+def usage():
+    for line in open(__file__):
+        if line.startswith("#!") or line.startswith("# (c)") or line.startswith("# author:"):
+            continue
+        if not line.startswith("#"):
+            break
+        print(re.sub(r"^# ?", "", line.rstrip("\n")))
+
+
+def die(msg):
+    print(f"perm-asks: {msg} (perm-asks -h)", file=sys.stderr)
+    sys.exit(2)
+
+
+def parse_args(argv):
+    days, split, top, verbose = None, None, 10, False
+    it = iter(argv)
+    for a in it:
+        if a in ("-h", "--help", "help"):
+            usage()
+            sys.exit(0)
+        if a in ("-v", "--verbose", "verbose"):
+            verbose = True
+            continue
+        if a in ("-d", "--days", "-s", "--split", "-n", "--top"):
+            v = next(it, None)
+            if v is None:
+                die(f"{a} needs a value")
+            try:
+                if a in ("-d", "--days"):
+                    days = float(v)
+                    if not 0 < days < float("inf"):
+                        raise ValueError
+                elif a in ("-n", "--top"):
+                    top = int(v)
+                    if top < 1:
+                        raise ValueError
+                else:
+                    split = dt.datetime.fromisoformat(v)
+                    if split.tzinfo is None:
+                        split = split.astimezone()
+            except ValueError:
+                die(f"bad value for {a}: {v}")
+        else:
+            die(f"unknown argument: {a}")
+    return days, split, top, verbose
+
+
+def last_settings_change():
+    """Time and short sha of the last commit that changed ~/.claude/settings.json, or None."""
+    env = {k: v for k, v in os.environ.items() if k not in ("GIT_DIR", "GIT_WORK_TREE")}
+    try:
+        r = subprocess.run(["git", "-C", SETTINGS_REPO, "log", "-1", "--no-show-signature",
+                            "--format=%cI %h", "--", "settings.json"],
+                           capture_output=True, text=True, timeout=10, env=env)
+        when, sha = r.stdout.strip().splitlines()[-1].split()
+        return dt.datetime.fromisoformat(when), sha
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+        return None
+
+
+def dur(seconds):
+    h = int(seconds // 3600)
+    if h == 0:
+        return f"{int(seconds // 60)}m"
+    return f"{h // 24}d {h % 24}h" if h >= 24 else f"{h}h"
+
+
+def window(days, split, now):
+    """Window start (epoch seconds), the split (or None) and how to describe them."""
+    if days is not None:
+        return now - days * 86400, split, f"last {days:g}d"
+    note = "given"
+    if split is None:
+        found = last_settings_change()
+        if found is None:
+            return now - FALLBACK_DAYS * 86400, None, f"last {FALLBACK_DAYS}d (no settings commit found)"
+        if found[0].timestamp() >= now:
+            return now - FALLBACK_DAYS * 86400, None, f"last {FALLBACK_DAYS}d (settings commit dated in the future)"
+        split, sha = found
+        note = f"last settings change, commit {sha}"
+    after = max(now - split.timestamp(), 0)
+    before = min(after, BEFORE_CAP_DAYS * 86400)
+    return split.timestamp() - before, split, f"{dur(before)} before, {dur(after)} after the split ({note})"
+
+
+def kind(pd):
+    s, r = pd.get("source"), pd.get("reasonType")
+    if pd.get("decision") == "reject":
+        return "ask-rejected" if s == "user_reject" else f"block-{r or s or 'unknown'}"
+    if s == "user_temporary" or (s == "user_permanent" and r != "rule"):
+        return "ask-approved"
+    return None
+
+
+OPS = {"&&", "||", "|", ";", "&", ">", ">>", "<", "2>", "2>&1", "&>", "|&"}
+WORD = re.compile(r"[a-z][a-z0-9._-]{0,13}")      # keys are longer than a subcommand
+
+
+def shown(tok, pos):
+    """A token is shown only when its shape is known to be safe; anything else is '…'."""
+    if tok in OPS or re.fullmatch(r"\d?>>?(&\d)?|<<-?\w*", tok):
+        return tok
+    if re.fullmatch(r"[A-Za-z_]\w*=.*", tok, re.S):                 # VAR=value
+        return tok.split("=", 1)[0] + "=…"
+    if tok.startswith("--"):                                       # --flag, --flag=value
+        name = tok.split("=", 1)[0]
+        return (name if re.fullmatch(r"--[a-z][a-z0-9-]*", name) else "--…") + ("=…" if "=" in tok else "")
+    if tok.startswith("-"):                                        # -x, -abc; longer is -x…
+        return tok if re.fullmatch(r"-[A-Za-z0-9]{1,3}", tok) else tok[:2] + "…"
+    if re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}(:\d+)?", tok):           # LAN address
+        return tok
+    if re.match(r"[a-z][a-z0-9+.-]*://", tok):                      # URL: scheme and host only
+        host = re.sub(r"^[^/]*//([^/@]*@)?([^/:?#]*).*", r"\2", tok)
+        return tok.split("://")[0] + "://" + host + "/…"
+    if (re.match(r"(~|\.{1,2}|\$SCRATCH)?/", tok) and not re.search(r"[\s'\"@:=]", tok)
+            and not re.search(r"[A-Za-z0-9_+-]{32,}", tok)):
+        return tok                                                 # a path
+    if pos < 2 and WORD.fullmatch(tok):                            # program and subcommand
+        return tok
+    return "…"
+
+
+def masked(s):
+    s = s[:2000]
+    try:
+        lex = shlex.shlex(s, posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        toks = list(lex)
+    except ValueError:
+        toks = s.split()
+    out, pos = [], 0
+    for tok in toks:
+        if tok in OPS:
+            out.append(tok)
+            pos = 0
+            continue
+        if pos == 0 and "/" in tok and not tok.startswith(("http", "-")):
+            tok_shown = shown(tok, 99)                             # program given by path
+        else:
+            tok_shown = shown(tok, pos)
+        out.append(tok_shown)
+        if not re.fullmatch(r"[A-Za-z_]\w*=.*", tok, re.S):        # VAR=x before a program
+            pos += 1
+    return re.sub(r"(… )+…", "…", " ".join(out))
+
+
+def target(use):
+    inp = use.get("input") or {}
+    head = inp.get("command") or inp.get("file_path") or inp.get("url") or ""
+    head = re.sub(r"\s+", " ", str(head)).strip()
+    head = re.sub(r"/Users/shrix|/Volumes/NVMe2TB/shrix", "~", head)
+    return masked(re.sub(r"/private/tmp/claude-501/\S*?/scratchpad\b", "$SCRATCH", head))
+
+
+def label(use):
+    return f"{use.get('name', '?')} {' '.join(target(use).split(' ')[:2])[:60]}".strip()
+
+
+def example(use):
+    s = target(use)
+    return s[:120] + ("…" if len(s) > 120 else "")
+
+
+def project(cwd):
+    m = re.search(r"/Git/([^/]+)", cwd or "")
+    return m.group(1) if m else (cwd or "?").replace(HOME, "~")
+
+
+def main():
+    days, split, top, verbose = parse_args(sys.argv[1:])
+    now = time.time()
+    if split is not None and split.timestamp() >= now:
+        die(f"the split {split.isoformat(timespec='minutes')} is not in the past")
+    cut, split, span = window(days, split, now)
+    phases = ["all"] if split is None else ["before", "after"]
+    calls = collections.Counter()
+    asks = collections.Counter()
+    blocks = collections.Counter()
+    questions = collections.Counter()
+    what = collections.defaultdict(collections.Counter)
+    examples = collections.defaultdict(dict)
+    proj = collections.defaultdict(collections.Counter)
+    files = []
+    for f in glob.glob(f"{HOME}/.claude/projects/**/*.jsonl", recursive=True):
+        try:
+            if os.path.getmtime(f) >= cut:
+                files.append(f)
+        except OSError:
+            continue
+    seen = set()
+    for f in files:
+        uses = {}
+        try:
+            lines = open(f, errors="replace").readlines()
+        except OSError:
+            continue
+        for line in lines:
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(e, dict):
+                continue
+            if e.get("type") == "assistant":
+                for b in (e.get("message") or {}).get("content") or []:
+                    if isinstance(b, dict) and b.get("type") == "tool_use":
+                        uses[b.get("id")] = b
+                continue
+            ts, uid = e.get("timestamp"), e.get("uuid")
+            if e.get("type") != "user" or not isinstance(ts, str) or (uid and uid in seen):
+                continue
+            try:
+                t = dt.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if t.tzinfo is None:
+                t = t.replace(tzinfo=dt.timezone.utc)
+            cwd = str(e.get("cwd") or "")
+            if t.timestamp() < cut or re.match(r"/(private/)?tmp(/|$)", cwd):
+                continue
+            if uid:
+                seen.add(uid)
+            ph = "all" if split is None else ("before" if t < split else "after")
+            pd = e.get("permissionDecision")
+            content = (e.get("message") or {}).get("content")
+            for b in content if isinstance(content, list) else []:
+                if not (isinstance(b, dict) and b.get("type") == "tool_result"):
+                    continue
+                calls[ph] += 1
+                use = uses.get(b.get("tool_use_id")) or {}
+                k = kind(pd) if isinstance(pd, dict) else None
+                if k is None and b.get("is_error"):
+                    txt = str(b.get("content"))[:300]
+                    if "permission request aborted" in txt or "permission prompt timed out" in txt:
+                        k = "ask-unanswerable"
+                if k is None:
+                    continue
+                if k.startswith("block"):
+                    blocks[(ph, k)] += 1
+                elif use.get("name") in QUESTIONS:
+                    questions[ph] += 1
+                else:
+                    asks[(ph, k)] += 1
+                    what[ph][label(use)] += 1
+                    examples[ph].setdefault(label(use), example(use))
+                    proj[ph][project(cwd)] += 1
+
+    print(f"transcripts: {len(files)} · window: {span} · /tmp sessions skipped")
+    if split is not None:
+        print(f"split at {split.isoformat(timespec='minutes')}")
+        if split.timestamp() <= cut:
+            print("perm-asks: the split is before the window starts — add -d to reach past it", file=sys.stderr)
+    print(f"\n{'phase':8} {'calls':>7} {'asks':>5} {'per100':>7} {'appr':>5} {'rej':>4} {'unans':>5} {'blocks':>6} {'questions':>9}")
+    for ph in phases:
+        a = sum(n for (p, _), n in asks.items() if p == ph)
+        bl = sum(n for (p, _), n in blocks.items() if p == ph)
+        print(f"{ph:8} {calls[ph]:7d} {a:5d} {100 * a / max(calls[ph], 1):7.2f} "
+              f"{asks[(ph, 'ask-approved')]:5d} {asks[(ph, 'ask-rejected')]:4d} "
+              f"{asks[(ph, 'ask-unanswerable')]:5d} {bl:6d} {questions[ph]:9d}")
+    if split is not None and calls["after"] < MIN_CALLS:
+        print(f"after: only {calls['after']} calls so far — too soon to judge the change")
+    if split is not None and calls["before"] < MIN_CALLS:
+        print(f"before: only {calls['before']} calls — too few to compare; reach further back with "
+              f"-d <days> -s {split.astimezone():%Y-%m-%dT%H:%M}")
+    bt = collections.Counter()
+    for (_, k), n in blocks.items():
+        bt[k] += n
+    if bt:
+        print("\nblocks by type: " + " · ".join(f"{k[6:]} {n}" for k, n in bt.most_common()))
+    for ph in ["after"] if split is not None else phases:
+        if not what[ph]:
+            continue
+        print(f"\ntop asks — {ph}:")
+        for k, n in what[ph].most_common(top):
+            print(f"  {n:4d}  {k}")
+            if verbose:
+                print(f"        e.g. {examples[ph][k]}")
+        print("  by project: " + " · ".join(f"{p} {n}" for p, n in proj[ph].most_common(6)))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except BrokenPipeError:
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
