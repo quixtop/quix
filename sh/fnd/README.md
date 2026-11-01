@@ -8,6 +8,8 @@ Fast filename search; -s switches to content search. Needs: fd, ripgrep.
 curl -fsSL https://quixtop.com/i | sh -s -- fnd
 ```
 
+Then in Claude Code: `/fnd`. The command runs `~/.local/bin/fnd` without asking each time.
+
 ## Requires
 
 - [fd](https://github.com/sharkdp/fd)

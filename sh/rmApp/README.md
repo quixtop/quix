@@ -8,6 +8,8 @@ Remove a Mac app and every on-disk trace it left behind. Needs: Homebrew.
 curl -fsSL https://quixtop.com/i | sh -s -- rmapp
 ```
 
+Then in Claude Code: `/rmApp`. The command runs `~/.local/bin/rmApp` without asking each time. Only when you type it.
+
 ## Requires
 
 - [Homebrew](https://brew.sh) — optional — to find brew-installed shims

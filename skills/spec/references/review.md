@@ -180,7 +180,7 @@ closed per Step 6), and a fresh review count (7) when a no-go returns to Steps
 
 Each panel, round and single review adds one line to the spec's Review
 section, from the agents' reported usage — `<panel>` is `idea panel`,
-`review panel`, `round 2`, `single review` or `go-with-changes`, and `<n>`
+`idea panel, extra wave`, `review panel`, `round 2`, `single review` or `go-with-changes`, and `<n>`
 counts the merger:
 
 `<panel>: <n> agents · <k>k tokens · <min> min`
@@ -193,7 +193,9 @@ recorded (the Review line above records what was spent) and never waits for
 an answer: `idea panel: <n> agents · ~<k>k tokens · skipped: <lens>
 (<reason>), …` — `<n>` counting the merger, `<k>` about 56 per agent; with no
 lens skipped it ends after the tokens — or `review panel: 6 agents ·
-~330k–450k tokens`. These are token figures from the measured runs in
+~330k–450k tokens`. An extra wave's planned-spend line starts `idea panel,
+extra wave:` in place of `idea panel:`, its `skipped:` tail naming the lenses
+still unrun. These are token figures from the measured runs in
 `docs/spec/think-and-review-spikes.md`; the dollars vary with the session
 model. A light run that switches to full says, in its one-line notice,
 `switch to full: review panel 6 agents · ~330k–450k tokens in place of one

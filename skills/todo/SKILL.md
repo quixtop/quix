@@ -1,7 +1,7 @@
 ---
 name: todo
 author: shrix
-description: "(shrix) Personal todo list manager backed by a configurable file (default ~/md/tasks.md, folders as ## headings). Use when the user runs /todo to view, add, remove, complete/un-complete items, clear done items, or set the file path. NOT for project task tracking (use proj-tasks)."
+description: "(shrix) Personal todo list manager backed by a configurable file (default ~/md/todo.md, folders as ## headings). Use when the user runs /todo to view, add, remove, complete/un-complete items, clear done items, or set the file path. NOT for project task tracking (use proj-tasks)."
 metadata:
   version: "2.0"
   category: status
@@ -10,7 +10,7 @@ effort: low
 
 # Todo List (`/todo`)
 
-Personal todo manager. Default file is `~/md/tasks.md`; the path can be reconfigured persistently. The ctxbar mod's task pane edits the same file through `todo.py --json` (its contract is ctxbar's `docs/spec/ctxbar-task-panel.md` § 4.7). The mod also registers `/todo`: typed bare it opens or closes the pane; with words it runs this script with them and shows its output itself.
+Personal todo manager. Default file is `~/md/todo.md`; the path can be reconfigured persistently. The ctxbar mod's task pane edits the same file through `todo.py --json` (its contract is ctxbar's `docs/spec/ctxbar-task-panel.md` § 4.7). The mod also registers `/todo`: typed bare it opens or closes the pane; with words it runs this script with them and shows its output itself.
 
 ## File format
 
@@ -33,8 +33,7 @@ The contract both `/todo` and the task pane keep (ctxbar spec § 4.4):
 | `/todo clear` | Wipe all done items |
 | `/todo path` | Show the current todo file path |
 | `/todo path <new-path>` | Set the todo file path (persistent) |
-| `/todo path reset` | Restore the default `~/md/tasks.md` |
-| `todo.py migrate` / `migrate --undo` | Move an old `~/md/todo.md` into `~/md/tasks.md` under `## gen` (once); undo while nothing was edited |
+| `/todo path reset` | Restore the default `~/md/todo.md` |
 | `/todo help`, `-h`, `--help` | Show help — full command listing with examples |
 
 **Numbering:** items are **continuously numbered** — pending first (1..P), then done (P+1..P+D). All number-taking commands (`remove`, `completed`, `uncheck`) use this unified scheme. `remove N` works on any item; `completed N` errors if N is already done; `uncheck N` errors if N is still pending. Done items render with ✅ right-aligned in a straight vertical column based on the longest done-item text, so the checkmarks line up regardless of item length.
@@ -48,11 +47,11 @@ The contract both `/todo` and the task pane keep (ctxbar spec § 4.4):
 
 The echo line always shows the canonical resolved form regardless of input style, so `/todo -a item1`, `/todo --add item1`, `/todo a item1`, and `/todo add item1` all produce byte-identical output.
 
-**Configuration:** the active path is stored in `~/.agents/skills/todo/config` (one line, just the absolute path). Absent → default (`~/md/tasks.md`) is used. `path reset` deletes the config file. While `~/md/tasks.md` is missing and `~/md/todo.md` holds the tasks, every command but `help`, `path` and `migrate` says to run `migrate` and changes nothing; with `~/md/tasks.md.pre-folders` there too, they say to resolve it by hand. `migrate` refuses a `todo.md` or `tasks.md` that is a link.
+**Configuration:** the active path is stored in `~/.agents/skills/todo/config` (one line, just the absolute path). Absent → default (`~/md/todo.md`) is used. `path reset` deletes the config file.
 
 **Folders:** with a `## ` heading in the file, the list is grouped under folder names (done items carry `· folder`), `add` goes to the first named folder, and echoes name the tasks (`› completed 2 (Buy milk)`). Without one it looks and works exactly as before.
 
-**Restore:** `~/md/tasks.md.prev` is the file before the last edit; `~/md/tasks.md.deleted` keeps every removed line under a timestamp; `~/md/tasks.md.pre-folders` is the file before the migration.
+**Restore:** `~/md/todo.md.prev` is the file before the last edit; `~/md/todo.md.deleted` keeps every removed line under a timestamp.
 
 **Batching:** use `,` to separate multiple items or numbers in one command. Examples:
 - `/todo add Buy milk, Call mom, Write skill`

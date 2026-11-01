@@ -22,7 +22,7 @@
 #                     only safe shapes are shown (program, subcommand, flags,
 #                     paths, LAN addresses, URL hosts) — every other value is …
 #   -h, --help        this help
-import atexit, collections, datetime as dt, glob, json, os, re, shlex, subprocess, sys, time
+import atexit, collections, datetime as dt, getpass, glob, json, os, re, shlex, subprocess, sys, time
 
 atexit.register(lambda: sys.stdout.isatty() and print())
 
@@ -179,11 +179,15 @@ def masked(s):
     return re.sub(r"(… )+…", "…", " ".join(out))
 
 
+# Your home, and your folder on any other disk (/Volumes/<disk>/<you>), both shown as ~.
+HOME_PATHS = re.compile(rf"(?:{re.escape(os.path.expanduser('~'))}|/Volumes/[^/\s]+/{re.escape(getpass.getuser())})(?![^/\s])")
+
+
 def target(use):
     inp = use.get("input") or {}
     head = inp.get("command") or inp.get("file_path") or inp.get("url") or ""
     head = re.sub(r"\s+", " ", str(head)).strip()
-    head = re.sub(r"/Users/shrix|/Volumes/NVMe2TB/shrix", "~", head)
+    head = HOME_PATHS.sub("~", head)
     return masked(re.sub(r"/private/tmp/claude-501/\S*?/scratchpad\b", "$SCRATCH", head))
 
 

@@ -8,6 +8,8 @@ Pack an installed skill into one markdown file that installs itself — share a 
 curl -fsSL https://quixtop.com/i | sh -s -- skill2file
 ```
 
+Then in Claude Code: `/skill2file`. The command runs `~/.local/bin/skill2file` without asking each time.
+
 ## Requires
 
 - [Python 3](https://www.python.org)

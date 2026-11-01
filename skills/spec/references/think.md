@@ -50,8 +50,11 @@ approves them.
 The gate **stops** (confirm or correct) only when an Assumption found in the
 request or the code answers one of the drill's required-topic rows — 1, 2, 4,
 5 or 6 (scope, success, security, today, constraints) — naming those rows, or
-when § Contradictions applies (a contradiction stop asks § Contradictions'
-question, not confirm or correct); otherwise it goes on in the same turn to
+when § Contradictions applies — at the gate, a found Assumption that
+contradicts a Decided entry (a contradiction stop asks § Contradictions'
+question, not confirm or correct; when a required row is found too, the same
+turn also asks the confirm, and the gate goes on only once both are answered;
+an unanswered one is asked again); otherwise it goes on in the same turn to
 the idea panel. A correction updates Decided and shows the gate again; at a stop,
 a confirm moves the found group into Decided; the recommended group stays
 Assumptions until the go. No agent runs before the gate goes on or is
@@ -60,13 +63,16 @@ gate" means until it decides.
 
 ## Contradictions
 
-From the concept gate to the Step 6 go, an answer or an idea-panel problem
-that contradicts a Decided entry, without saying it replaces it, stops every
+From the concept gate to the Step 6 go, an answer, a found Assumption at the
+concept gate or an idea-panel problem that contradicts a Decided entry, without saying it replaces it, stops every
 file write for that turn. Ask: "This contradicts Decided <n>: which one
 stands?" The answer updates Decided, and the next turn goes on. A gate
 correction, a follow-up answer, a go with changes and a walk `change`
 (`references/review.md` § Walk at the go) replace Decided by design: they
-never trigger this.
+never trigger this. A correction of a found Assumption after the gate went on
+is not a contradiction either (the entry is not Decided): it is Decided when
+given; one given at the go is a go with changes. The panel does not re-run for
+it.
 
 ## Idea panel
 
@@ -93,16 +99,33 @@ The run routes every problem itself, highest severity first, and shows at most
 - a **4.13 Out of Scope** entry — the part it names is cut;
 - a **4.12 Risk** — kept, with its early sign as the mitigation trigger.
 
-The concept gate shows again only when a follow-up changed Decided. The user's
-first reply after the wave, before Step 4 starts, when it names skipped
-lenses, runs them as ONE extra wave plus a merger, with its own planned-spend
-line, its problems routed as the first wave's; a later reply or a resumed
-concept takes no extra wave. The extra wave's lenses count against the panel's
-7 lens slots; its merger comes on top and is recorded, as a STOP recovery's
-does. The panel runs no other second time. Before the wave, print the planned-spend line
-(`references/review.md` § Cap and cost). Record in Review the panel's cost line and every
-other record review.md names (incomplete lenses, a STOP recovery, the write
-check), plus every problem not shown.
+The concept gate shows again only when a follow-up changed Decided. It then
+stops, by § Concept gate's rule, only on found Assumptions it has not shown
+before; whether it goes on or is confirmed, it continues to § Approach pick,
+and the panel does not re-run.
+
+Any reply from the wave up to the Step 6 go — one after `/spec think` stopped
+and the go itself included — that names skipped lenses runs them as ONE extra
+wave plus a merger, with its own planned-spend line. A reply that also answers
+or corrects is applied first, and the extra wave gets the updated concept.
+Before Step 4 starts, its problems are routed as the first wave's, and a saved
+concept is updated in place; after it, they are routed as the first wave's into
+the spec — a follow-up or a contradiction becoming an Open question for the go,
+none into Decided — and applied as ONE go-with-changes round (SKILL.md Step 6),
+and the go is asked again. Until the go, while a lens is skipped and no extra
+wave has run, every asking turn and the save point end with `skipped lenses:
+<lens>, … — name any to run them`. The extra wave shares the first wave's 2
+follow-ups and its one STOP recovery; a lens of it that STOPs once the
+recovery is used is `incomplete`. Its planned-spend line and its Review cost
+line start `idea panel, extra wave:`. After Step 4, the spec's 4.1, Decided
+and Assumptions stand in for the concept. The extra wave's lenses count
+against the panel's 7 lens slots; its merger comes on top and is recorded, as
+a STOP recovery's does. The panel runs no other second time.
+
+Before each wave, print the planned-spend line (`references/review.md` § Cap
+and cost). Record in Review the panel's cost line and every other record
+review.md names (incomplete lenses, a STOP recovery, the write check), plus
+every problem not shown.
 
 ## Approach pick
 
@@ -126,7 +149,9 @@ the recovery. `/spec think` stops here and prints how to resume: `/spec
 - **Resume** (Step 0.2): nothing the concept answers is asked again; the run
   goes on in the mode the user gives (`/spec light <feature>` resumes in light
   mode), and § Contradictions applies against the concept's Decided until the
-  go.
+  go. A reply after `/spec think` stopped that names skipped lenses runs § Idea
+  panel's extra wave on the saved concept; a resume itself does not ask, and the
+  go presents any lens still skipped.
 - **Step 4 after a save point** — a resume or a plain run going on — keeps the
   concept's Open questions, Decided, Assumptions, Alternatives considered, ADR
   drafts and Review lines as they are, moves each routed problem to the place

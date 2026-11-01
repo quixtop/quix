@@ -8,6 +8,8 @@ Your Claude plan's usage at a glance — the 5-hour and weekly windows as bars, 
 curl -fsSL https://quixtop.com/i | sh -s -- cc-usage
 ```
 
+Then in Claude Code: `/cc-usage`. The command runs `~/.local/bin/cc-usage` without asking each time.
+
 ## Requires
 
 - [Python 3](https://www.python.org)

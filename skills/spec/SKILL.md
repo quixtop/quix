@@ -300,7 +300,7 @@ Critical `fixed after round 2 — not re-reviewed` (light mode also: every fix r
 `fixed — not re-reviewed`); then the outputs written
 (absolute paths); the review result (rounds, fixed, refuted, open); Decided, Assumptions (with the chosen
 approach), Open questions (each with its recommended answer) and
-Prerequisites; the To file list word for word; and what the go runs —
+Prerequisites; the idea panel's skipped lenses (when an idea panel ran and no extra wave did; naming any runs them, `references/think.md` § Idea panel); the To file list word for word; and what the go runs —
 the filing and `/arch` (saying "creates" when no figure exists yet). Then
 ASK for go, go with changes, no-go, drop it or walk (when the walk set of
 `references/review.md` § Walk at the go is not empty). Only the

@@ -9,13 +9,16 @@
 # emptied only by `purge`, after a y/N. Both questions need you at the keyboard.
 #
 # Usage:
-#   bkup nvme ssd                     /Volumes/NVMe2TB/shrix → /Volumes/SSD2TB/nvme-shrix-bkup
-#   bkup ssd nvme                     /Volumes/SSD2TB/shrix  → /Volumes/NVMe2TB/ssd-shrix-bkup
+#   bkup nvme ssd                     NVME_SRC → NVME_TO_SSD, from the shortcuts file
+#   bkup ssd nvme                     SSD_SRC  → SSD_TO_NVME, from the shortcuts file
 #   bkup <source> <dest>              any folder → any folder (never one inside the other)
 #   bkup <…> -a | --approve | approve list files gone from the source; on y, move them to .deleted
 #   bkup <…> -p | --purge | purge     show what .deleted holds; on y, empty it
 #   bkup -h | --help | help
 #
+# Shortcuts file: ~/.config/bkup/shortcuts (BKUP_SHORTCUTS names another), one
+# KEY=/path line each for NVME_SRC, NVME_TO_SSD, SSD_SRC, SSD_TO_NVME; read, never run.
+# A shortcut whose two paths are not both set is refused.
 # A destination under /Volumes/<drive> is refused unless that drive is mounted.
 # Needs Homebrew rsync (/opt/homebrew/bin/rsync); macOS's openrsync lacks options used here.
 # Log: ~/Library/Logs/bkup.log
@@ -23,10 +26,16 @@
 set -uo pipefail
 
 RSYNC=/opt/homebrew/bin/rsync
-NVME_SRC=/Volumes/NVMe2TB/shrix
-SSD_SRC=/Volumes/SSD2TB/shrix
-NVME_TO_SSD=/Volumes/SSD2TB/nvme-shrix-bkup
-SSD_TO_NVME=/Volumes/NVMe2TB/ssd-shrix-bkup
+SHORTCUTS="${BKUP_SHORTCUTS:-$HOME/.config/bkup/shortcuts}"
+NVME_SRC="" SSD_SRC="" NVME_TO_SSD="" SSD_TO_NVME=""
+if [ -r "$SHORTCUTS" ]; then
+  while IFS='=' read -r key val || [ -n "$key" ]; do
+    val=${val%$'\r'}                                        # CRLF file
+    key="${key#"${key%%[![:space:]]*}"}" key="${key%"${key##*[![:space:]]}"}"
+    val="${val#"${val%%[![:space:]]*}"}" val="${val%"${val##*[![:space:]]}"}"
+    case "$key" in NVME_SRC|SSD_SRC|NVME_TO_SSD|SSD_TO_NVME) printf -v "$key" '%s' "$val" ;; esac
+  done < "$SHORTCUTS"
+fi
 LOG="$HOME/Library/Logs/bkup.log"
 LOCK=""
 
@@ -93,11 +102,11 @@ if [ ${#args[@]} -ne 2 ]; then
   status fail "need a source and a destination — bkup -h"
   exit 1
 fi
-src="${args[0]}" dest="${args[1]}"
+src="${args[0]}" dest="${args[1]}" pair=""
 if [ "$src" = nvme ] && [ "$dest" = ssd ]; then
-  src=$NVME_SRC dest=$NVME_TO_SSD
+  pair="NVME_SRC NVME_TO_SSD" src=$NVME_SRC dest=$NVME_TO_SSD
 elif [ "$src" = ssd ] && [ "$dest" = nvme ]; then
-  src=$SSD_SRC dest=$SSD_TO_NVME
+  pair="SSD_SRC SSD_TO_NVME" src=$SSD_SRC dest=$SSD_TO_NVME
 else
   for w in "$src" "$dest"; do
     case "$w" in nvme|ssd)
@@ -106,6 +115,13 @@ else
     esac
   done
 fi
+for k in $pair; do
+  case "${!k}" in
+    "")  status fail "shortcut not set — put ${pair% *} and ${pair#* } in $SHORTCUTS"; exit 1 ;;
+    /?*) ;;
+    *)   status fail "$k in $SHORTCUTS must be an absolute path, not: ${!k}"; exit 1 ;;
+  esac
+done
 again=$(printf '%q ' "${args[@]}")     # the command line to suggest back, safely quoted
 
 [ -x "$RSYNC" ] || { status fail "Homebrew rsync not found at $RSYNC — brew install rsync"; exit 1; }

@@ -8,6 +8,8 @@ Reclaim space by APFS-cloning duplicate files — deletes nothing. Needs: Python
 curl -fsSL https://quixtop.com/i | sh -s -- dedup
 ```
 
+Then in Claude Code: `/dedup`. The command runs `~/.local/bin/dedup` without asking each time.
+
 ## Requires
 
 - [Python 3](https://www.python.org)

@@ -8,6 +8,8 @@ Watch ~/.claude.json's size with health indicators. Needs: jq, Claude Code.
 curl -fsSL https://quixtop.com/i | sh -s -- cc-chk
 ```
 
+Then in Claude Code: `/cc-chk`. The command runs `~/.local/bin/cc-chk` without asking each time.
+
 ## Requires
 
 - [jq](https://github.com/jqlang/jq)

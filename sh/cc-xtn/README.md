@@ -8,6 +8,8 @@ Enable and disable Claude Code plugins, skills and MCP servers; see their token 
 curl -fsSL https://quixtop.com/i | sh -s -- cc-xtn
 ```
 
+Then in Claude Code: `/cc-xtn`. The command runs `~/.local/bin/cc-xtn` without asking each time. Only when you type it.
+
 ## Requires
 
 - [jq](https://github.com/jqlang/jq)

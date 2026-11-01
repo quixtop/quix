@@ -8,6 +8,8 @@ macOS diagnostics in one run — CPU, memory, disk, thermal, top processes.
 curl -fsSL https://quixtop.com/i | sh -s -- syschk
 ```
 
+Then in Claude Code: `/syschk`. The command runs `~/.local/bin/syschk` without asking each time.
+
 ## Usage
 
 ```text

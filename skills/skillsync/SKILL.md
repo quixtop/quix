@@ -46,6 +46,11 @@ python3 ~/.agents/skills/skillsync/scripts/skillsync.py [--fix | add <name>]
 - **OK** — enabled skills with no issues
 - **NEEDS-FIX** — enabled skills with failing checks (listed per skill)
 - **DISABLED** — disabled skills (informational; shown with issues if any)
+- **MODS** — plugins in `~/.agents/skills/` (no `SKILL.md`; `.claude-plugin/plugin.json` with
+  author `shrix`), report-only: flags one missing `"keywords": ["mod"]` and one also linked in
+  `~/.claude/skills/`. `--fix` never touches a mod. Enabled mods only. Mods count as known
+  names in § Bundles, which silences the unknown-name warning; references TO a mod are not
+  checked against the bundles.
 - **WARN** — orphaned (dangling) symlinks in `~/.claude/skills/`: either leftovers pointing
   at a disabled skill (disabled skills must keep no symlink) or truly broken links;
   references outside a bundle (`skill → /other`); names in § Bundles that are no shrix

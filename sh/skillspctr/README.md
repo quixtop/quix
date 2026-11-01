@@ -8,6 +8,8 @@ Scan an agent skill for risky code before you install it — a folder, a collect
 curl -fsSL https://quixtop.com/i | sh -s -- skillspctr
 ```
 
+Then in Claude Code: `/skillspctr`. The command runs `~/.local/bin/skillspctr` without asking each time.
+
 ## Requires
 
 - [SkillSpector](https://github.com/NVIDIA/skillspector) — the scanner it runs

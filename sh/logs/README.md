@@ -8,6 +8,8 @@ Print or follow a project's server log with the colour codes stripped. Needs: pr
 curl -fsSL https://quixtop.com/i | sh -s -- logs
 ```
 
+Then in Claude Code: `/logs`. The command runs `~/.local/bin/logs` without asking each time.
+
 ## Requires
 
 - [proj-env.sh](https://github.com/quixtop/quix/blob/main/sh/proj-env.sh/README.md) — sourced at start

@@ -8,6 +8,8 @@ A local HTTP server that shuts itself down when idle. Needs: Python 3.
 curl -fsSL https://quixtop.com/i | sh -s -- serve
 ```
 
+Then in Claude Code: `/serve`. The command runs `~/.local/bin/serve` without asking each time.
+
 ## Requires
 
 - [Python 3](https://www.python.org)

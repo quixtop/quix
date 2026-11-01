@@ -15,6 +15,8 @@ Checks every such skill dir in ~/.agents/skills/ (enabled) and
 And, report-only, every reference one shrix skill makes to another (`/name`, or
 a path into skills/<name>/) in its SKILL.md, references/ or scripts/: it must
 sit inside a bundle, or be a listed mention, in CONVENTIONS.md § Bundles.
+Mods are listed apart, report-only: a folder with no SKILL.md whose
+.claude-plugin/plugin.json names author shrix, marked "keywords": ["mod"].
 
 Usage:
   skillsync.py [--fix] [--help]
@@ -24,6 +26,7 @@ Note: runctl-managed commands are out of scope — use 'runctl list' for those.
 """
 
 import atexit
+import json
 import os
 import re
 import sys
@@ -117,6 +120,41 @@ def is_shrix_skill(skill_md: Path) -> bool:
     if not lines or lines[0].strip() != "---" or not any(x.strip() == "---" for x in lines[1:]):
         return False
     return parse_frontmatter(skill_md).get("author", "") == "shrix"
+
+
+def mod_issues(entry: Path):
+    """None when the folder is no shrix mod, else its issues ([] = fine). A mod is
+    a real folder with no SKILL.md whose .claude-plugin/plugin.json names author
+    shrix; it marks itself with "keywords": ["mod"]."""
+    manifest = entry / ".claude-plugin" / "plugin.json"
+    if entry.is_symlink() or (entry / "SKILL.md").exists() or not manifest.is_file():
+        return None
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    author = data.get("author") if isinstance(data, dict) else None
+    if (author.get("name") if isinstance(author, dict) else author) != "shrix":
+        return None
+    issues = []
+    keywords = data.get("keywords")
+    if not (isinstance(keywords, list) and "mod" in keywords):
+        issues.append('missing the mod marker: "keywords": ["mod"] in .claude-plugin/plugin.json')
+    link = CLAUDE_SKILLS / entry.name
+    if link.is_symlink() and link.resolve() == entry.resolve():
+        issues.append(f"also linked as a skill in ~/.claude/skills/{entry.name} — report-only, never removed here")
+    return issues
+
+
+def get_user_mod_dirs():
+    """Yield (dirname, issues) for every shrix mod in ~/.agents/skills/ (enabled
+    only: cc-xtn disables skills, never mods)."""
+    if SKILLS_ENABLED.exists():
+        for entry in sorted(SKILLS_ENABLED.iterdir()):
+            if entry.is_dir():
+                issues = mod_issues(entry)
+                if issues is not None:
+                    yield entry.name, issues
 
 
 def get_user_skill_dirs():
@@ -311,14 +349,14 @@ def references_between(skills) -> dict:
     return found
 
 
-def check_bundles(skills):
+def check_bundles(skills, mods=()):
     """(outside, unknown) — references outside every bundle and not a listed
-    mention, and § Bundles names that are no shrix skill; None if no § Bundles."""
+    mention, and § Bundles names that are no shrix skill or mod; None if no § Bundles."""
     parsed = parse_bundles(CONVENTIONS)
     if parsed is None:
         return None
     bundles, mentions = parsed
-    known = {d for d, _, _ in skills}
+    known = {d for d, _, _ in skills} | set(mods)
     listed = {n for b in bundles for n in b} | set(mentions) | {n for v in mentions.values() for n in v}
     outside = []
     for src, refs in sorted(references_between(skills).items()):
@@ -588,6 +626,7 @@ def main() -> int:
             ok_skills.append((dirname, plain))
 
     orphans = find_orphaned_symlinks()
+    mods    = list(get_user_mod_dirs())
 
     # ---- Report -------------------------------------------------------------
     if ok_skills:
@@ -612,12 +651,19 @@ def main() -> int:
             else:
                 print(f"  {dirname}")
 
+    if mods:
+        print(f"\nMODS ({len(mods)}) — plugins, not skills; report-only:")
+        for dirname, issues in mods:
+            print(f"  {dirname}")
+            for issue in issues:
+                print(f"    - {issue}")
+
     if orphans:
         print(f"\nWARN — Orphaned symlinks ({len(orphans)}):")
         for name, target, reason in orphans:
             print(f"  ~/.claude/skills/{name}  ->  {target}   [{reason}]")
 
-    bundle_check = check_bundles(all_skills)
+    bundle_check = check_bundles(all_skills, [d for d, _ in mods])
     if bundle_check is None:
         print("\nWARN — no § Bundles in CONVENTIONS.md — bundle check skipped")
     else:
@@ -628,9 +674,9 @@ def main() -> int:
             for src, dst in outside:
                 print(f"  {src} → /{dst}")
         if unknown:
-            print(f"\nWARN — named in CONVENTIONS.md § Bundles but not a shrix skill: {', '.join(unknown)}")
+            print(f"\nWARN — named in CONVENTIONS.md § Bundles but not a shrix skill or mod: {', '.join(unknown)}")
 
-    if not ok_skills and not needs_fix and not disabled_skills:
+    if not ok_skills and not needs_fix and not disabled_skills and not mods:
         print("\n(no shrix skills found)")
 
     # ---- Fix ----------------------------------------------------------------
