@@ -9,6 +9,12 @@
 # answered "always" without a matching rule. Blocks (hook, classifier, safety
 # check) are counted apart. AskUserQuestion / ExitPlanMode are questions, not
 # permission prompts, and are listed apart. Sessions under /tmp are skipped.
+# Asks are also counted by cause, as the transcript recorded it: an ask rule
+# (named by matching the call against that settings file AS IT IS NOW —
+# absolute or ~/ paths, Bash prefixes and globs, tool names; else only the
+# file is named), a Bash command no rule covered (with Claude Code's reason),
+# or no reason recorded. An allow rule never stops an ask that an ask rule
+# caused.
 #
 # Usage: perm-asks [-d <days>] [-s <when>] [-n <top>] [-v]
 #   With no -d or -s, the counts split at the last commit that changed
@@ -118,6 +124,86 @@ def window(days, split, now):
     return split.timestamp() - before, split, f"{dur(before)} before, {dur(after)} after the split ({note})"
 
 
+SETTINGS = {"userSettings": lambda cwd: f"{HOME}/.claude/settings.json",
+            "projectSettings": lambda cwd: f"{cwd}/.claude/settings.json",
+            "localSettings": lambda cwd: f"{cwd}/.claude/settings.local.json"}
+EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
+ASK_RULES = {}
+
+
+def ask_rules(path):
+    """The ask rules of one settings file, read once."""
+    if path not in ASK_RULES:
+        try:
+            with open(path) as fh:
+                rules = json.load(fh)["permissions"]["ask"]
+        except (OSError, ValueError, KeyError, TypeError):
+            rules = []
+        ASK_RULES[path] = [r for r in rules if isinstance(r, str)] if isinstance(rules, list) else []
+    return ASK_RULES[path]
+
+
+def glob_re(pat, bash):
+    """A rule's glob as a regex: ** spans folders, * stays inside one (for Bash, * spans anything)."""
+    out, i = "", 0
+    while i < len(pat):
+        if pat.startswith("**/", i):
+            out, i = out + "(?:.*/)?", i + 3
+        elif pat.startswith("**", i):
+            out, i = out + ".*", i + 2
+        elif pat[i] == "*":
+            out, i = out + (".*" if bash else "[^/]*"), i + 1
+        else:
+            out, i = out + re.escape(pat[i]), i + 1
+    return re.compile(out + r"\Z", re.S)
+
+
+def matches(rule, use):
+    """Whether a permission rule covers this tool call; a form not handled here never matches."""
+    m = re.fullmatch(r"([\w-]+)(?:\((.*)\))?", rule, re.S)
+    if not m:
+        return False
+    tool, spec = m.groups()
+    name, inp = use.get("name") or "", use.get("input") or {}
+    if not (tool == name or (tool == "Edit" and name in EDIT_TOOLS)
+            or (tool.startswith("mcp__") and name.startswith(tool + "__"))):
+        return False
+    if spec is None:
+        return True
+    if tool in ("Edit", "Read"):
+        path = str(inp.get("file_path") or inp.get("notebook_path") or "")
+        if spec.startswith("//"):
+            spec = spec[1:]
+        elif spec.startswith("~/"):
+            spec = HOME + spec[1:]
+        else:
+            return False                                           # relative to a settings file
+        return bool(path) and bool(glob_re(spec, False).match(path))
+    if tool == "Bash":
+        cmd = str(inp.get("command") or "").strip()
+        if spec.endswith(":*"):
+            return cmd == spec[:-2] or cmd.startswith(spec[:-2] + " ")
+        return bool(glob_re(spec, True).match(cmd))
+    return False
+
+
+def cause(pd, use, cwd):
+    """Why a call asked, as the transcript recorded it; an ask rule is named from today's settings."""
+    if not isinstance(pd, dict):
+        return "no reason recorded"
+    code = str(pd.get("reasonCode") or "")
+    if code.startswith("rule:"):
+        src = str(pd.get("ruleSource") or code[5:])
+        where = SETTINGS.get(src)
+        hits = [r for r in ask_rules(where(cwd)) if matches(r, use)] if where else []
+        if not hits:
+            return f"ask rule in {src}"
+        return f"ask rule {hits[0]} ({src})"
+    if code.startswith("bashMiss:"):
+        return f"bash, no rule: {code[9:]}"
+    return code or str(pd.get("reasonType") or "") or "no reason recorded"
+
+
 def kind(pd):
     s, r = pd.get("source"), pd.get("reasonType")
     if pd.get("decision") == "reject":
@@ -219,6 +305,8 @@ def main():
     what = collections.defaultdict(collections.Counter)
     examples = collections.defaultdict(dict)
     proj = collections.defaultdict(collections.Counter)
+    causes = collections.defaultdict(collections.Counter)
+    cause_tools = collections.defaultdict(collections.Counter)
     files = []
     for f in glob.glob(f"{HOME}/.claude/projects/**/*.jsonl", recursive=True):
         try:
@@ -283,6 +371,9 @@ def main():
                     what[ph][label(use)] += 1
                     examples[ph].setdefault(label(use), example(use))
                     proj[ph][project(cwd)] += 1
+                    c = cause(pd, use, cwd)
+                    causes[ph][c] += 1
+                    cause_tools[(ph, c)][use.get("name") or "?"] += 1
 
     print(f"transcripts: {len(files)} · window: {span} · /tmp sessions skipped")
     if split is not None:
@@ -315,6 +406,9 @@ def main():
             if verbose:
                 print(f"        e.g. {examples[ph][k]}")
         print("  by project: " + " · ".join(f"{p} {n}" for p, n in proj[ph].most_common(6)))
+        print(f"\nasks by cause — {ph}:")
+        for c, n in causes[ph].most_common(top):
+            print(f"  {n:4d}  {c}  [{'/'.join(t for t, _ in cause_tools[(ph, c)].most_common(2))}]")
 
 
 if __name__ == "__main__":

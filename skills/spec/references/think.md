@@ -1,16 +1,17 @@
-# spec — Steps 1–3 in full mode: the think stage
+# spec — Steps 1–3 in EGM-full and EGM-lite: the think stage
 <!-- author: shrix -->
 
-READ at Step 1 in full mode, and § Save point and resume plus § Contradictions
-when Step 0.2 resumes a concept. Light mode, post-build mode and spec-only
-re-runs do not run this stage. READ `references/questions.md` for the bank and
+READ at Step 1 in EGM-full and EGM-lite, and § Save point and resume plus
+§ Contradictions when Step 0.2 resumes a concept. Lite, post-build mode
+and spec-only re-runs do not run this stage. READ `references/questions.md` for the bank and
 the drill form. Step numbers are `spec/SKILL.md`'s.
 
 The stage attacks the idea before any spec exists. **The only turns that
 ask:** the drill's questions, the concept gate when it stops, at most 2
 follow-ups after the idea panel, a contradiction, a lens STOP
-(`references/review.md` § Panel), and the approach pick when approaches
-differ on scope or security.
+(`references/review.md` § Panel), the depth line (`references/questions.md`
+§ Depths), an EGM-lite run's ask to switch to EGM-full, and the approach pick when
+approaches differ on scope or security.
 Everything else — routing the panel's problems, the save point — runs in the
 same turn, with no extra confirm.
 
@@ -24,11 +25,9 @@ order. A question the request, the code or the existing spec's Decided
 already answers is not asked: an existing Decided entry stays Decided, an
 answer found in the request or the code is an **Assumption** until the gate.
 
-- **Turn 1 offers light mode** beside its first question when the
-  small-feature test holds (SKILL.md § Invocation, Light) — never under
-  `think`. Only an explicit yes takes it ("recommended" and "recommended for
-  the rest" decline it); the run then goes on in light mode from Step 2's
-  batch, with no concept gate, idea panel or save point.
+- **In an `EGM-lite` run the drill takes at most 3 turns**, the required
+  topics first — the depth is set before the drill, and a depth word in a
+  drill reply changes it (`references/questions.md` § Depths).
 - **The drill ends** when the required topics are answered, after 6 turns, or
   when the user says "recommended for the rest" on any turn, the first
   included. A follow-up on an answer counts as a turn. The concept gate always
@@ -36,7 +35,7 @@ answer found in the request or the code is an **Assumption** until the gate.
 - The user's answers are **Decided**; every bank question neither asked nor
   already answered takes its recommended answer as an **Assumption**. "All
   questions" lifts the 6-turn cap and asks the whole bank, one question per
-  turn.
+  turn; "All questions" lifts EGM-lite's 3-turn cap too.
 
 ## Concept gate
 
@@ -122,6 +121,13 @@ and Assumptions stand in for the concept. The extra wave's lenses count
 against the panel's 7 lens slots; its merger comes on top and is recorded, as
 a STOP recovery's does. The panel runs no other second time.
 
+In an `EGM-lite` run, only Scope and reuse and Pre-mortem and the merger run,
+whatever the **Runs** lines say. The other lenses are not skipped: no
+skipped-lenses tail and no extra wave. Naming one asks `<lens> runs only in
+EGM-full — switch to EGM-full?`; a yes makes the run EGM-full: the named lenses run as
+§ Idea panel's extra wave, then the review panel at Step 5. Its problems are
+routed as above, with at most 1 follow-up.
+
 Before each wave, print the planned-spend line (`references/review.md` § Cap
 and cost). Record in Review the panel's cost line and every other record
 review.md names (incomplete lenses, a STOP recovery, the write check), plus
@@ -137,18 +143,21 @@ Alternatives considered, in the form of `references/specification-template.md`.
 
 ## Save point and resume
 
-For a NEW feature in full mode, the turn that ends Step 3 also writes
+For a NEW feature in EGM-full (EGM-lite too), the turn that ends Step 3 also writes
 `<root>/docs/spec/<feature>.md` with `Status: draft — concept`, holding: Open
 questions, 4.1 Feature Overview, Decided, Assumptions, Alternatives
 considered, the ADR drafts (under To file), the routed problems, and a Review
-section with the idea panel's records. A re-run of an existing spec writes
+section with the idea panel's records; it opens its Review section with the
+`depth:` line (`references/review.md` § Cap and cost). A re-run of an existing spec writes
 nothing here: Step 4 overwrites it as today, and `references/rerun.md` covers
 the recovery. `/spec think` stops here and prints how to resume: `/spec
 <feature>`.
 
 - **Resume** (Step 0.2): nothing the concept answers is asked again; the run
-  goes on in the mode the user gives (`/spec light <feature>` resumes in light
-  mode), and § Contradictions applies against the concept's Decided until the
+  goes on in the mode the user gives (`/spec lite <feature>` resumes in lite
+  mode). With no word it takes the concept's recorded depth (a concept with
+  none is EGM-full) and prints `depth: <d> (from the concept — reply lite |
+  EGM-lite | EGM-full to change)`; § Contradictions applies against the concept's Decided until the
   go. A reply after `/spec think` stopped that names skipped lenses runs § Idea
   panel's extra wave on the saved concept; a resume itself does not ask, and the
   go presents any lens still skipped.

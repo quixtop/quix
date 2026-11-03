@@ -6,6 +6,8 @@ The code review is not scan.py's: secscan calls claude-security (and security-au
 
 Usage: scan.py [full|changes|deps|secrets|code|ci|agents] [--base SHA] [--only ENGINE]
                [--json] [PATH]
+       scan.py secrets --strict [--json] [PATH]   keyscan --strict over the files alone (no history): no allow
+                     marker and no .gitleaksignore waves a value through — for files about to be published
        scan.py doctor        engines, versions, data age, what the sandbox blocks
        scan.py update        refresh trivy's databases and semgrep's rule packs (network)
        scan.py report FINDINGS.json OUTDIR   write secscan-<date>.md and .json (-HHMMSS on a same-day rerun)
@@ -538,7 +540,7 @@ def build_rules(d: Path) -> tuple | None:
     return len(blocks), dups
 
 
-def runs_for(name: str, repo: Repo, mode: str) -> list:
+def runs_for(name: str, repo: Repo, mode: str, strict: bool = False) -> list:
     """Each engine's invocations: (argv after the binary, cwd or None for an empty folder, extra env)."""
     top = repo.top
     ch = repo.changed
@@ -546,6 +548,10 @@ def runs_for(name: str, repo: Repo, mode: str) -> list:
     absf = [str(top / f) for f in touched]
     scope = str(repo.scope)
     if name == "keyscan":
+        # --strict reads the FILES only: keyscan takes it with paths alone (never -H, -s or --range), and a publish
+        # scan wants exactly what is published, not the history behind it
+        if strict:
+            return [(["--strict", "--json", scope], top, {})]
         if ch is None:
             r = [(["--json", scope], top, {})]
             if repo.is_git:
@@ -766,7 +772,7 @@ def keyscan_unread(results: list) -> str:
 
 
 def run_engines(repo: Repo, mode: str, only: str | None = None, cmd_hint: str = "",
-                progress=None) -> tuple:
+                progress=None, strict: bool = False) -> tuple:
     """Every engine that applies, all at once: version checks in parallel, then every run of every engine in one
     pool (SECSCAN_JOBS workers, default the CPU count). Coverage keeps the mode's engine order; progress(coverage,
     findings, seconds) is called for each engine as it finishes, or at once when it cannot run; keyscan's runs are
@@ -808,7 +814,7 @@ def run_engines(repo: Repo, mode: str, only: str | None = None, cmd_hint: str = 
                 cov[name] = g
                 tell(name)
             else:
-                runs[name] = runs_for(name, repo, mode)
+                runs[name] = runs_for(name, repo, mode, strict)
         results = {n: [None] * len(r) for n, r in runs.items()}
         left = {n: len(r) for n, r in runs.items()}
         futures = {pool.submit(run_one, bins[n], argv, cwd, env, timeout, n not in NEEDS_HOME): (n, i)
@@ -1638,7 +1644,8 @@ def revision(repo: Repo) -> str:
     return h + ("-dirty" if dirty else "")
 
 
-def scan(mode: str, path: Path, base: str | None, only: str | None, as_json: bool, cmd_hint: str) -> int:
+def scan(mode: str, path: Path, base: str | None, only: str | None, as_json: bool, cmd_hint: str,
+         strict: bool = False) -> int:
     repo = discover(path, mode, base)
     def show(c: Coverage, fs: list, secs: float) -> None:
         line = progress_line(c, fs, secs)
@@ -1647,7 +1654,7 @@ def scan(mode: str, path: Path, base: str | None, only: str | None, as_json: boo
         except (OSError, ValueError):       # a closed stderr never stops the scan
             pass
 
-    findings, coverage = run_engines(repo, mode, only, cmd_hint, progress=show)
+    findings, coverage = run_engines(repo, mode, only, cmd_hint, progress=show, strict=strict)
     findings, old = settle(findings, repo)
     doc = {"revision": revision(repo), "mode": mode if not repo.note else "full", "base": repo.base, "note": repo.note,
            "findings": [{k: v for k, v in asdict(f).items() if k != "group"} for f in findings],
@@ -1710,12 +1717,14 @@ def main(argv: list) -> int:
             return mirror(args[1], Path(args[2]) if len(args) == 3 else Path.cwd())
         except CannotRun as e:
             return fail(str(e))
-    mode, path, base, only, as_json = "full", None, None, None, False
+    mode, path, base, only, as_json, strict = "full", None, None, None, False, False
     i = 0
     while i < len(args):
         a = args[i]
         if a in MODES:
             mode = a
+        elif a == "--strict":
+            strict = True
         elif a == "--base" and i + 1 < len(args):
             base, i = args[i + 1], i + 1
         elif a == "--only" and i + 1 < len(args):
@@ -1733,11 +1742,13 @@ def main(argv: list) -> int:
         i += 1
     if base is not None and mode != "changes":
         return fail("--base goes with changes mode")
+    if strict and mode != "secrets":
+        return fail("--strict goes with secrets mode — scan.py secrets --strict [--json] [PATH]")
     if only and only not in MODE_ENGINES[mode]:
         return fail(f"--only {only} is not part of {mode} mode — engines: {', '.join(MODE_ENGINES[mode])}")
     hint = shlex.join(["python3", script, *args])
     try:
-        return scan(mode, path or Path.cwd(), base, only, as_json, hint)
+        return scan(mode, path or Path.cwd(), base, only, as_json, hint, strict)
     except CannotRun as e:
         return fail(str(e))
 

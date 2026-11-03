@@ -12,6 +12,25 @@ Legend: **goal** default goal · **gates** hard gates · **measure** how to
 measure · **moves** safe moves, biggest first · **guard** what holds the gain
 · **never** what the profile forbids.
 
+## Where a fix lives — rules, skills, prompts, Claude Code setup
+Pick the cheapest form that fixes what the evidence shows:
+
+| the evidence shows | the fix's form |
+|---|---|
+| the same mechanical step redone every run (extract, convert, check) | a script, with its inputs, outputs and failure behaviour |
+| a multi-step procedure that only some situations need | on-demand text (a `references/` or `rules-ref` file), its trigger named in the always-on text |
+| ordinary order or wording | short always-on text |
+| a clear rule skipped again and again — repeated evidence, never one miss | a hook or a gate that never blocks valid work: a proposal for its own yes, never applied in the run |
+| one stochastic miss, once | nothing — that is noise (`judging.md` § Held-out samples) |
+
+A form that creates a new file needs its folder in the contract's editable
+surface (SKILL.md §2); a form whose path the contract does not cover is a
+proposal, not an edit. Where the profile's gates forbid the form — rule text
+moves only verbatim, so a rule turned into a script — or the form is a new
+skill, it is a proposal for its own yes. Always-on text costs tokens on
+every turn: a change that adds some names what it cuts, or the report names
+the net increase.
+
 ---
 
 ## A. Code and scripts

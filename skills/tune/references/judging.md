@@ -72,6 +72,8 @@ alone; beating it proves the findings did the work.
 - Split 60 / 40 and keep the split fixed. Diagnose from the training samples
   only; accept by the held-out score; pick the best version by held-out
   score, not the latest.
+- A failure in one sample, or in one of a sample's 3 runs, is noise: a
+  change aimed at it alone overfits. Aim at failures that repeat.
 - No progress for a round? Suspect the samples before the artifact.
 
 ## Anti-gaming

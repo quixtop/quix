@@ -33,6 +33,7 @@ folder). `P=~/.agents/skills/secscan/scripts/scan.py`
 | `/secscan code` | semgrep + gosec | both, on the mirror, as bare `/secscan` |
 | `/secscan agents` | skillspector + trivy (dependency files in agent folders) | `security-audit`, its AI, LLM and agent guide, on the mirror's agent folders |
 | `/secscan deps` · `secrets` · `ci` | trivy + hadolint · keyscan · zizmor + actionlint | nothing: engine results only |
+| `scan.py secrets --strict` (no slash form) | keyscan `--strict`: no allow marker and no `.gitleaksignore` waves a value through | nothing — for files about to be PUBLISHED (a publish step's scan), never a repo's own test fixtures |
 | `… quick` | the same | `claude-security` alone, effort `low` (only when the owner says `quick`; a mode that calls only `security-audit` keeps it) |
 | `… deep` | the same | both; `claude-security` effort `high` (standard: `medium`); a mode that calls only `security-audit` is unchanged |
 | `… audit` | all that apply | `security-audit` in full-audit mode alone, on the mirror |

@@ -1,7 +1,7 @@
 ---
 name: spec
 author: shrix
-description: "(shrix) Every project doc in one skill. Before the build: turn a feature — given, or taken from the conversation — into a reviewed spec, plan, reqs, arch (with its diagrams), design and tasks, filed on ONE go, then offer /dev; in full mode it first drills the idea and attacks it with a panel of agents, and a panel reviews the spec. After the build: the same set plus README and API docs, written from the code. Keeps docs in sync: /spec update | verify | changelog; /spec review <file> reviews any doc. Use to spec a feature, think an idea through (/spec think), document existing code, update docs after changes, check docs against the code, review a doc, or write release notes — not quick ideation (superpowers:brainstorming) or the build itself (/dev)."
+description: "(shrix) Every project doc in one skill. Before the build: turn a feature — given, or taken from the conversation — into a reviewed spec, plan, reqs, arch (with its diagrams), design and tasks, filed on ONE go, then offer /dev; in EGM-full it first drills the idea and attacks it with a panel of agents, and a panel reviews the spec. After the build: the same set plus README and API docs, written from the code. Keeps docs in sync: /spec update | verify | changelog; /spec review <file> reviews any doc. Use to spec a feature, think an idea through (/spec think), document existing code, update docs after changes, check docs against the code, review a doc, or write release notes — not quick ideation (superpowers:brainstorming) or the build itself (/dev)."
 metadata:
   version: "0.5.0"
   category: documentation
@@ -39,9 +39,11 @@ Sections run in the order they are used.
 
 ```
 /spec add ability to share chats with teammates
-/spec light add a copy-link button   ← light mode, for a small feature
+/spec lite add a copy-link button    ← lite (the default): one batch, one reviewer
+/spec EGM-lite add tags              ← a milder EGM-full: short drill, two lenses, one reviewer
+/spec EGM-full add sync              ← the think stage and the review panel
 /spec                 ← takes the feature from the conversation
-/spec think [idea]    ← full mode, Steps 1–3 only: stops at the save point (`draft — concept`)
+/spec think [idea]    ← EGM-full, Steps 1–3 only: stops at the save point (`draft — concept`)
 /spec review <file>…  ← the review panel on existing docs; reports, changes nothing
 /spec docs [path]     ← post-build: document code that already exists (a path narrows it)
 /spec update [scope]  ← sync docs with code changes (a base SHA or BASE..HEAD; none → everything unpushed)
@@ -56,8 +58,8 @@ Sections run in the order they are used.
   it takes — `update`/`verify`: a SHA or `BASE..HEAD`; `docs`, `review`: an
   existing path; `think`: the idea. Otherwise the whole text is a feature
   (`/spec update the login copy`). `think` alone takes the feature from the
-  conversation, as bare `/spec`; it runs full mode only — `light think` is
-  refused in one line. `review` alone asks which file; with one → READ
+  conversation, as bare `/spec`; it runs EGM-full only — `lite think` and
+  `EGM-lite think` are refused in one line. `review` alone asks which file; with one → READ
   `references/review.md` § Standalone review: Step 0.1 resolves `<root>` and
   0.2's plan lookup finds the plan; no other step runs.
 
@@ -67,34 +69,24 @@ Sections run in the order they are used.
   investigation), else the latest feature-shaped request. Announce it in one
   line — `Speccing: <feature>` — and go on. No candidate, or two that fit
   equally, → ask which feature.
-- **Light** — `light` first, or offered on the drill's first turn when the
-  feature is small, and taken only on the user's yes: one area of the code,
-  about five plan tasks at most, nothing touching auth, secrets, user data
-  or data that leaves the machine. User data = accounts, personal data about
-  people, or content other people can see or send — not the project's own
-  state, config, logs or check records, nor the owner's own local files;
-  leaving the machine = sent over the network or to a third-party service (a
-  push of the project's own repo excepted). Every step still runs, lighter:
-  Steps 1–3 keep the one batch and the automatic pick; Step 4 writes only
-  the spec sections that apply (no N/A filler), each companion it triggers
-  always inside the spec — data and migration with rollback, the API
-  contract, spike notes; Step 5 runs ONE reviewer (round 2 only after a Critical stored-data or interface fix). The go, the filing
-  and the safety gates are unchanged. Only the threat model's trigger
-  appearing mid-run switches Steps 4 onward to full (companions, the review panel), said in one
-  line with the added cost — `switch to full: review panel 6 agents ·
-  ~330k–450k tokens in place of one reviewer (~65k)`; the think stage is not
-  replayed.
+- **Depth** — `lite` (the default), `EGM-lite` or `EGM-full`, as the first
+  word, in any case. With none, the run picks: lite, or EGM-lite on a
+  stored-data, interface or size trigger, said in one line with no wait; the
+  security trigger recommends EGM-full in one line with each depth's cost,
+  and the run waits. READ `references/questions.md` §
+  Depths before Step 2: the table, the triggers, the lines, and how lite
+  and EGM-lite run.
 
 ## Quick Reference
 
 | step | does | output |
 |---|---|---|
 | 0. Resolve | project root, re-run check, `<feature>` name, tools, sources | — |
-| 1. Vision | core intent, knowns and unknowns | chat (full: at the concept gate) |
-| 2. Requirements | full: drill, concept gate (`think.md`) · light: CRITICAL questions in one batch, the rest assumed | chat, recorded in the spec (full: at the save point · light: at Step 4) |
-| 3. Design | full: idea panel (triggered lenses), you pick on a scope or security difference, save point · light: the recommended approach taken | full: `draft — concept` spec · light: chat |
+| 1. Vision | core intent, knowns and unknowns | chat (EGM-full: at the concept gate) |
+| 2. Requirements | EGM-full: drill, concept gate (`think.md`; EGM-lite: ≤ 3 turns) · lite: CRITICAL questions in one batch, the rest assumed | chat, recorded in the spec (EGM-full: at the save point · lite: at Step 4) |
+| 3. Design | EGM-full: idea panel (triggered lenses), you pick on a scope or security difference, save point · EGM-lite: two lenses · lite: the recommended approach taken | EGM-full: `draft — concept` spec · lite: chat |
 | 4. Generate | spec (with To file), companions, plan | `docs/spec/…`, `docs/plan/…` |
-| 5. Review loop | full: a panel of 5 roles · else one isolated reviewer; fix or refute; re-review of the changed sections only after a Critical, scope or security fix (light mode: only a Critical stored-data or interface fix) | Review section in the spec |
+| 5. Review loop | EGM-full: a panel of 5 roles · else one isolated reviewer; fix or refute; re-review of the changed sections only after a Critical, scope or security fix (lite: only a Critical stored-data or interface fix) | Review section in the spec |
 | 6. Go / no-go | ONE approval for everything still to file | the user's answer |
 | 7. File | capture docs and ADRs, Status, figures | the project's doc families |
 | 8. Close | Final Package, opening with the key points; offer `/dev` | chat |
@@ -160,7 +152,7 @@ told that `as-built` requirements need no plan task.
    - **Spec only** is for changes that need no build work — wording,
      clarifications, decisions already built, and dropping a planned
      decision; anything that needs build work goes to the follow-up feature.
-     Steps 1–3 run as in light mode (no think stage); it changes Steps 4–8:
+     Steps 1–3 run as in lite (no think stage); it changes Steps 4–8:
      READ `references/rerun.md` before Step 4.
    - **Built already?** `/spec docs`, or the feature's code exists with no
      spec → post-build mode (§ Post-build mode), said in one line. An
@@ -190,22 +182,23 @@ told that `as-built` requirements need no plan task.
 
 ## Step 1: Vision
 
-Full mode: READ `references/think.md` — it runs Steps 1–3. Light mode,
+EGM-full and EGM-lite: READ `references/think.md` — it runs Steps 1–3. Lite,
 post-build mode and spec-only re-runs: READ `references/questions.md` — the
 vision block (post-build: § Post-build mode) and Step 2's batch.
 
 ## Step 2: Requirements
 
-Full mode: the drill and concept gate of `references/think.md`. Light mode and
+EGM-full and EGM-lite: the drill and concept gate of `references/think.md`. Lite and
 spec-only re-runs: the batch of `references/questions.md` § Step 2 — the
 run's one up-front ask; post-build mode: § Post-build mode, in that form.
 
 ## Step 3: Design
 
-Brainstorm 2–4 approaches (light mode: 1–2) — for each: how it works, the
-user flow, pros, cons, complexity, effort — compared in one table. Full mode:
+Brainstorm 2–4 approaches (lite: 1–2) — for each: how it works, the
+user flow, pros, cons, complexity, effort — compared in one table. EGM-full:
 first `references/think.md` § Idea panel, then § Approach pick and § Save
-point and resume. Light mode: take the recommended one as an **Assumption**;
+point and resume. EGM-lite: `references/think.md` § Idea panel, as `references/questions.md` § Depths limits it,
+then the same. Lite: take the recommended one as an **Assumption**;
 when the approaches differ on scope or security, the pick is a CRITICAL
 decision and becomes an **Open question** instead. Draft an ADR (`Status:
 Proposed`) for every significant decision, per
@@ -247,7 +240,7 @@ title until Step 7; no approval is needed yet.
    - **Review** — filled by Step 5, below any lines Step 3 saved.
 2. **Companions** — only when the feature triggers them. Each IS its spec
    section: inside the spec while it fits about one screen, its own file
-   beyond that, with the section pointing to the file (light mode: always
+   beyond that, with the section pointing to the file (lite: always
    inside the spec, unless it is already a file). Once a file, it stays
    a file; one a re-run no longer triggers is marked `No longer applies`,
    never deleted.
@@ -289,18 +282,18 @@ title until Step 7; no approval is needed yet.
 
 ## Step 5: Review loop
 
-READ `references/review.md` and run it: full mode, the review panel (§ Panel);
-light mode, post-build mode and spec-only re-runs, § Single reviewer. It owns
+READ `references/review.md` and run it: EGM-full, the review panel (§ Panel);
+lite, post-build mode and spec-only re-runs, § Single reviewer. It owns
 closing findings, round 2 and the self-review fallback. Never skipped.
 
 ## Step 6: Go / no-go
 
 ONE approval. Present first: any Critical finding still open, then each
-Critical `fixed after round 2 — not re-reviewed` (light mode also: every fix round 2 did not see,
+Critical `fixed after round 2 — not re-reviewed` (lite also: every fix round 2 did not see,
 `fixed — not re-reviewed`); then the outputs written
 (absolute paths); the review result (rounds, fixed, refuted, open); Decided, Assumptions (with the chosen
 approach), Open questions (each with its recommended answer) and
-Prerequisites; the idea panel's skipped lenses (when an idea panel ran and no extra wave did; naming any runs them, `references/think.md` § Idea panel); the To file list word for word; and what the go runs —
+Prerequisites; the idea panel's skipped lenses (when an EGM-full idea panel ran and no extra wave did; naming any runs them, `references/think.md` § Idea panel); the To file list word for word; and what the go runs —
 the filing and `/arch` (saying "creates" when no figure exists yet). Then
 ASK for go, go with changes, no-go, drop it or walk (when the walk set of
 `references/review.md` § Walk at the go is not empty). Only the
@@ -315,7 +308,10 @@ user's go counts — never declare one yourself.
   reviewer brief and write check) over ONLY the sections the change touched (the plan
   tasks it changed included), checked against the rest of
   the set — fix its Critical and Important findings, log the rest — and ask
-  again.
+  again. When every change is a fix that a reviewer wrote, applied as written,
+  no round runs: each is listed at the go as `applied as proposed — not
+  re-reviewed`. Any other change, or one on scope or security, among them →
+  the round runs over all of them.
 - **Walk** → READ `references/review.md` § Walk at the go and run it; it
   ends at this question again.
 - **No-go with gaps** → return to the step that owns each gap, then repeat

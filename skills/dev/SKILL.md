@@ -43,7 +43,7 @@ a necessary edit beyond it is named, with its reason, before it is made.
 Planning belongs to
 `/spec` (its plan written by `superpowers:writing-plans`), before this
 skill is invoked. **Given a rough idea and no reviewed plan**, say so and
-offer `/spec` (`/spec light` for a small feature): it writes and reviews the
+offer `/spec` (`/spec lite` for a small feature): it writes and reviews the
 plan, then offers `/dev`. Never improvise a plan inside the run.
 
 NOT for: a single task (ordinary flow), exploratory work, or a batch of

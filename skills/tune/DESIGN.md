@@ -39,6 +39,11 @@ on "optimize this", so the word users reach for finds it.
 | Apply inside the project, ask outside | in-project work runs freely, except what reaches outside the machine or cannot be undone; outside the project, security wins |
 | Install a guard (a ratchet) | without a standard, gains drift back |
 | No population search, no API keys | hundreds of evaluations and external judges do not fit a session |
+| A per-profile library, read before diagnosis | without it each run rediscovers what an earlier run already tried; a lesson is re-checked, never trusted, because the earlier target differed |
+| Four change verdicts, `confounded` preferred to a guess | a wrong attribution misleads every later run; an honest "cannot tell" does not |
+| At most one lesson per entry, or `NO_LESSON` | a lesson the rows do not support is a guess stored as a fact |
+| The cheapest form that fixes it | always-on text is paid every turn; a script or on-demand text costs nothing until used |
+| A failure seen once is noise | a change aimed at one sample overfits |
 
 ## Sources
 - GEPA `optimize_anything` — failure feedback over bare scores
@@ -48,6 +53,7 @@ on "optimize this", so the word users reach for finds it.
 - contextstellar — cache-friendliness as a dimension
 - agentskills.io, skill-creator, Anthropic skill best practices — trigger evals with near-misses; a baseline every round
 - karpathy/autoresearch — one editable surface; a results ledger; the simplicity rule
+- google-research/harness2 (Harness², arXiv 2610.14224) — the per-domain experience library, four edit verdicts, one lesson with cue and evidence or none, the cheapest-component table, a 1-of-k failure as noise
 - skill-receipts — the placebo comparison
 - cloudflare web-perf, borghei performance-profiler — skip zero-impact work; evidence per fix
 - LLM-judge research (self-preference, style bias, position bias) and Hamel Husain's judge guide

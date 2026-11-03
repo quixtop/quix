@@ -49,7 +49,8 @@ the current list.
 **Companions**: [absolute paths, "in the spec", or "none"]
 **Filed**: reqs · arch · design · tasks · ADRs (as applied)
 **Figures**: `/arch`'s report line — archify [updated / created / not needed / stale] · ste100 [run / hub only / not needed / stale] — or `arch: not needed`, or `figure: stale — <why>`
-**Review**: [rounds] · [fixed] · [fixed after round 2, not re-reviewed] · [refuted] · [open: N — listed under Risks / open]
+**Depth**: [lite · EGM-lite · EGM-full] ([the `<why>` of the Review's `depth:` line])
+**Review**: [rounds] · [fixed] · [fixed after round 2, not re-reviewed] · [applied as proposed: N] · [refuted] · [open: N — listed under Risks / open]
 **[Committed as `<sha>` | Commit together | Keep together — not a git repo]**: the spec, plan and companions; the doc files and docs/adr/ entries Step 7 changed; archify.json with archify.html; ste100.json with its sheet and hub
 ```
 

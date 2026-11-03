@@ -25,6 +25,9 @@ below.
   why it matters · a suggested fix. A panel agent writes it to its own file
   and returns only the path and the `result:` line; one that cannot write its
   file returns the report itself. A reviewer returns the report itself.
+  Minor findings: a panel agent writes each Minor finding on one line,
+  `Minor · file:line · problem`; Critical and Important keep the full form.
+  A reviewer keeps the full form for every finding.
 
 ## Idea lenses
 
@@ -101,7 +104,7 @@ companions and the plan, and the code under `<root>`. Each role also gets its
 ### Design critic
 **Question**: Is this the right design, and does it handle what goes wrong?
 **Test**: A newcomer could say why this approach beat each rejected one, and what happens on every error path, on the first try.
-**Hard rule**: In a Step 5 run of a full-mode spec, no Alternatives entry is an Important finding; every vague requirement ("make it better"), undefined data item or missing error path is a finding.
+**Hard rule**: In a Step 5 run of an EGM-full spec, no Alternatives entry is an Important finding; every vague requirement ("make it better"), undefined data item or missing error path is a finding.
 **Reads**: Alternatives, the approach in Decided or Assumptions, 4.3, 4.4, 4.8, 4.9, 4.12, the companions.
 
 ### Build readiness

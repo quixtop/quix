@@ -24,6 +24,12 @@ counts, per tool call, whether you were asked: allowed once, rejected, or
 answered "always" without a matching rule. Blocks (hook, classifier, safety
 check) are counted apart. AskUserQuestion / ExitPlanMode are questions, not
 permission prompts, and are listed apart. Sessions under /tmp are skipped.
+Asks are also counted by cause, as the transcript recorded it: an ask rule
+(named by matching the call against that settings file AS IT IS NOW —
+absolute or ~/ paths, Bash prefixes and globs, tool names; else only the
+file is named), a Bash command no rule covered (with Claude Code's reason),
+or no reason recorded. An allow rule never stops an ask that an ask rule
+caused.
 
 Usage: perm-asks [-d <days>] [-s <when>] [-n <top>] [-v]
   With no -d or -s, the counts split at the last commit that changed

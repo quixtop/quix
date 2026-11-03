@@ -2,8 +2,8 @@
 <!-- author: shrix -->
 
 READ at Step 5, at Step 6's walk, and for `/spec review` (which has no go,
-so no walk). Full mode runs the review panel;
-light mode, post-build mode and spec-only re-runs run the single reviewer.
+so no walk). EGM-full runs the review panel;
+lite, post-build mode and spec-only re-runs run the single reviewer.
 
 ## Agent tools
 
@@ -42,7 +42,7 @@ git repo, or `fp` fails → Review records `write check: not run — <why>`.
 
 ## Panel
 
-Full mode: dispatch the 5 review roles of `references/lenses.md` § Review
+EGM-full: dispatch the 5 review roles of `references/lenses.md` § Review
 roles in ONE wave, each a fresh, isolated agent given the feature request,
 the run (Step 5 or standalone), `<root>`, the absolute paths of the spec (with every added section), every
 companion and the plan, its role block word for word, the § Checks rows that
@@ -98,7 +98,8 @@ starts, in this order:
 
 1. Critical findings still open;
 2. every fix no later review saw — `fixed after round 2 — not re-reviewed`,
-   light mode's `fixed — not re-reviewed`, round-1 fixes that stood on
+   lite's `fixed — not re-reviewed`, `applied as proposed — not
+   re-reviewed`, round-1 fixes that stood on
    round 1 (no round 2 ran over them), and a go-with-changes round's fixes;
 3. Important findings logged open after round 2;
 4. logged Minor findings.
@@ -143,7 +144,7 @@ as kept):
 
 ## Round 2
 
-Light mode has no round 2, except when round 1 fixed a Critical finding on
+Lite has no round 2, except when round 1 fixed a Critical finding on
 stored data or a public interface — then round 2 runs as below, over those
 fixes; its other fixes are labelled `fixed — not re-reviewed` and shown first
 at Step 6. Other modes: only when round 1 fixed a
@@ -197,17 +198,20 @@ lens skipped it ends after the tokens — or `review panel: 6 agents ·
 extra wave:` in place of `idea panel:`, its `skipped:` tail naming the lenses
 still unrun. These are token figures from the measured runs in
 `docs/spec/think-and-review-spikes.md`; the dollars vary with the session
-model. A light run that switches to full says, in its one-line notice,
-`switch to full: review panel 6 agents · ~330k–450k tokens in place of one
-reviewer (~65k)`; the review panel's planned-spend line is then skipped when
-the switch notice already named it.
+model. A trigger found mid-run asks the depth line (`references/questions.md`
+§ Depths); nothing switches on its own. The spec's Review section opens with
+`depth: <d> (<why>)`, where `<why>` is the word, `default`, `auto: <trigger>`
+(EGM-lite taken with no wait), `offer: <answer>` (an answered EGM-full
+offer), `reply: <word>` (a depth word in a reply before Step 4),
+`mid-run: <trigger>` (a switch), `concept` (a resume), `post-build` or
+`spec-only`.
 
 ## Checks
 
 Every check of the review, one row each, with its group and the one review
 role that owns it. The single reviewer gets the whole table; a panel role
 gets its rows. For a panel role, a row that qualifies the one above it, or
-applies only to light mode, is context, not a check of its own.
+applies only to lite, is context, not a check of its own.
 
 | sub-check | group | role |
 |---|---|---|
@@ -218,13 +222,13 @@ applies only to light mode, is context, not a check of its own.
 | every requirement maps to a plan task | Traceability | build readiness |
 | every task maps to a check | Traceability | build readiness |
 | nothing in the plan lacks a requirement | Traceability | build readiness |
-| all 13 sections filled or N/A with a reason | Completeness | build readiness |
+| all 13 sections filled or N/A with a reason (lite: only the sections that apply, no N/A filler) | Completeness | build readiness |
 | every triggered companion present | Completeness | build readiness |
 | every change to stored data or a public interface names its consumers and its rollback (a down() for each up()) | Completeness | claims against the code |
 | every error path covered | Completeness | design critic |
 | Assumptions, Open questions and Prerequisites stated | Completeness | build readiness |
 | a To file entry for every decision (in spec-only mode, every decision this run changed) | Completeness | build readiness |
-| light mode only: Alternatives filled, or `N/A — one viable approach` | Completeness | design critic |
+| lite only (EGM-lite included): Alternatives filled, or `N/A — one viable approach` | Completeness | design critic |
 | ONE file, phased if large, with estimates | Plan form | build readiness |
 | the header names `/dev` | Plan form | build readiness |
 | a Status line on every file | Plan form | build readiness |
@@ -243,10 +247,10 @@ applies only to light mode, is context, not a check of its own.
 
 ## Single reviewer
 
-Light mode, post-build mode and spec-only re-runs: ONE fresh, isolated,
+Lite, post-build mode and spec-only re-runs: ONE fresh, isolated,
 read-only reviewer over the whole set — the spec (with every added section),
 every companion, and the plan — with the write check around it. Give it the
-feature request, the mode, `<root>`, the absolute paths of
+feature request, the mode (an EGM-lite run is told `EGM-lite — lite's Step 5 rules apply`), `<root>`, the absolute paths of
 `references/specification-template.md` and `references/non-ui-specs.md`,
 § Agent tools' reviewer brief, the lenses.md "Every agent" list, and § Checks
 as its brief. Post-build: it checks every claim against the code instead of
